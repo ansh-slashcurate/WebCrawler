@@ -18,3 +18,7 @@ class PageItems(scrapy.Item):
     depth = scrapy.Field()
     crawledAt = scrapy.Field()
     content_hash = scrapy.Field()
+    cleaned_content = scrapy.Field()
+    tables = scrapy.Field()
+    is_pdf = scrapy.Field()
+    source = scrapy.Field()

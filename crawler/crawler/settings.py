@@ -7,12 +7,27 @@
 #     https://docs.scrapy.org/en/latest/topics/downloader-middleware.html
 #     https://docs.scrapy.org/en/latest/topics/spider-middleware.html
 
+import os
+import datetime
+
 BOT_NAME = "crawler"
 
 SPIDER_MODULES = ["crawler.spiders"]
 NEWSPIDER_MODULE = "crawler.spiders"
+COMMANDS_MODULE = "crawler.commands"
 
 ADDONS = {}
+
+# Write every crawl's log (including our per-page/link timing lines) to its
+# own timestamped file under logs/, in addition to the console. The PID is
+# included so two worker processes started in the same second (running the
+# crawl in parallel against the shared Redis frontier) don't clobber each
+# other's log file.
+LOG_DIR = os.path.join(os.path.dirname(__file__), "..", "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_FILE = os.path.join(LOG_DIR, f"crawl_{datetime.datetime.now():%Y%m%d_%H_%M_%S}_{os.getpid()}.log")
+LOG_LEVEL = "INFO"
+LOG_STDOUT = True
 
 
 # Crawl responsibly by identifying yourself (and your website) on the user-agent
@@ -60,6 +75,7 @@ DOWNLOAD_DELAY = 1
 # See https://docs.scrapy.org/en/latest/topics/item-pipeline.html
 ITEM_PIPELINES = {
     "crawler.pipelines.ContentDedupPipeline": 100,
+    "crawler.pipelines.NormalizationPipeline": 150,
     "crawler.pipelines.StoragePipeline": 200,
 }
 
@@ -87,11 +103,19 @@ ITEM_PIPELINES = {
 # Set settings whose default value is deprecated to a future-proof value
 FEED_EXPORT_ENCODING = "utf-8"
 
-# Persist scheduler state (pending requests + seen-request fingerprints) to
-# disk so a crashed/stopped crawl can resume with `scrapy crawl rag_crawler`
-# instead of starting over. Use a new directory per fresh crawl job; reusing
-# this one resumes the previous job instead of starting clean.
-JOBDIR = "crawls/rag_crawler-1"
+# Global cap: stop the crawl once this many pages have been scraped, so a
+# misconfigured seed/domain can't run away indefinitely.
+CLOSESPIDER_PAGECOUNT = 1000
+
+# Redis-backed frontier: the pending-request queue and the seen-request
+# dupefilter both live in Redis (same instance the ContentDedupPipeline
+# already uses) instead of on local disk. This replaces JOBDIR - a crawl
+# resumes automatically after a crash/restart because the frontier persists
+# in Redis, and multiple spider processes can share/split the same queue.
+REDIS_URL = "redis://localhost:6379/0"
+SCHEDULER = "scrapy_redis.scheduler.Scheduler"
+DUPEFILTER_CLASS = "scrapy_redis.dupefilter.RFPDupeFilter"
+SCHEDULER_PERSIST = True
 
 DOWNLOAD_HANDLERS = {
     "http": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
