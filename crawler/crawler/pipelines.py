@@ -20,6 +20,8 @@ from scrapy.exceptions import DropItem
 from lxml import etree, html as lxml_html
 import trafilatura
 
+from crawler.ytpipeline import render_video_text
+
 
 BROKEN_TAG_NAMES = "li|ul|ol|div|span|p|br|strong|em|table|tr|td|a|h[1-6]"
 
@@ -47,6 +49,25 @@ def utc_timestamp():
     return datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
+def slugify(name):
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+
+
+def resolve_run_dir(output_dir, run_id=None):
+    """Resolve an (already entity-scoped, if applicable) output dir down to one
+    run's subfolder: the given run_id, or otherwise whichever run subfolder was
+    modified most recently. Used by the reprocess/export_txt/clean commands so
+    they operate on one crawl's files instead of guessing a fixed filename."""
+    if run_id:
+        return os.path.join(output_dir, run_id)
+    if os.path.isdir(output_dir):
+        run_dirs = [d for d in os.listdir(output_dir) if os.path.isdir(os.path.join(output_dir, d))]
+        if run_dirs:
+            latest = max(run_dirs, key=lambda d: os.path.getmtime(os.path.join(output_dir, d)))
+            return os.path.join(output_dir, latest)
+    return output_dir
+
+
 def normalize_text(text: str) -> str:
     # drop well-formed leftover HTML tags trafilatura missed
     text = re.sub(r"<[^>]*>", "", text)
@@ -55,8 +76,8 @@ def normalize_text(text: str) -> str:
     text = re.sub(rf"([A-Za-z])(?:{BROKEN_TAG_NAMES})>", r"\1", text)
     # de-obfuscate emails before stripping punctuation below
     text = text.replace("[at]", "@").replace("[dot]", ".")
-    text = text.replace("|", "")
-    text = text.replace("-", "")
+    text = text.replace("|", " ")
+    text = text.replace("-", " ")
     # normalize all whitespace (including newlines) down to single spaces
     text = re.sub(r"\s+", " ", text)
     return text.strip()
@@ -126,7 +147,17 @@ class ContentDedupPipeline:
  
     def open_spider(self, spider):
         self.client = redis.from_url(self.redis_url)
- 
+        # scope the dedup set per entity AND per run (spider.run_id, assigned in
+        # WebsiteSpider._init_run): per-entity so a page stored while crawling
+        # entity A isn't wrongly treated as a duplicate of entity B's crawl; per-run
+        # so a later re-crawl gets a genuinely fresh, complete snapshot instead of
+        # having everything unchanged silently dropped as a "duplicate" of the
+        # first-ever run. A resumed (not fresh) run reuses the same run_id, so
+        # dedup still works correctly across a crash/restart of the same run.
+        scope = getattr(spider, "run_scope", None) or "default"
+        run_id = getattr(spider, "run_id", None)
+        self.hash_set_key = f"content_hashes:{scope}:{run_id}" if run_id else f"content_hashes:{scope}"
+
     def process_item(self, item, spider):
         adapter = ItemAdapter(item)
         content_hash = hashlib.sha256(adapter["html"].encode("utf-8")).hexdigest()
@@ -134,7 +165,7 @@ class ContentDedupPipeline:
         # SADD returns 0 if the member already existed - atomic, so two
         # workers hashing the same content at the same instant can't both
         # think they're first.
-        is_new = self.client.sadd("content_hashes", content_hash)
+        is_new = self.client.sadd(self.hash_set_key, content_hash)
         if not is_new:
             spider.crawler.stats.inc_value("dropped/duplicate")
             raise DropItem(f"Duplicate content: {adapter['url']}")
@@ -150,19 +181,32 @@ class NormalizationPipeline:
         adapter = ItemAdapter(item)
         html = adapter.get("html", "")
 
-        if adapter.get("is_pdf"):
+        # YoutubePipeline (runs before this one) already parsed video details
+        # from the page HTML and set this field for a recognized YouTube
+        # video URL - nothing left to extract here besides turning it to text
+        video_details = adapter.get("youtube_video")
+        if video_details is not None:
+            cleaned_content = normalize_text(render_video_text(video_details))
+            tables = []
+        elif adapter.get("is_pdf"):
             # the spider already extracted plain text from the PDF - there's
             # no HTML markup here, so trafilatura/table extraction don't apply
             cleaned_content = normalize_text(html)
             tables = []
         else:
             # tables are extracted separately (below) as structured data, so
-            # they don't get linearized into prose and mangled by normalize_text
-            raw_content = trafilatura.extract(html, include_tables=False) or ""
+            # they don't get linearized into prose and mangled by normalize_text.
+            # favor_recall=True: the default precision-favoring extraction drops
+            # card/grid-style content (e.g. a team/staff directory entry) as
+            # boilerplate even though it's real content worth keeping in the corpus
+            raw_content = trafilatura.extract(html, include_tables=False, favor_recall=True) or ""
             cleaned_content = normalize_text(raw_content)
             tables = extract_tables(html)
 
-        if not cleaned_content and not tables:
+        # comments (also set by YoutubePipeline, [] for every non-video page)
+        comments = adapter.get("comments") or []
+
+        if not cleaned_content and not tables and not comments:
             spider.crawler.stats.inc_value("dropped/empty")
             raise DropItem(f"No extractable content: {adapter.get('url')}")
 
@@ -172,6 +216,36 @@ class NormalizationPipeline:
 
         adapter["cleaned_content"] = cleaned_content
         adapter["tables"] = tables
+        adapter["comments"] = comments
+        return item
+
+
+# entity relevance pipeline - only active when the spider was started with
+# an entity query (spider.entity_query); re-checks against cleaned_content
+# (post-trafilatura, so no markup noise) rather than trusting the spider's
+# own raw-text scoring, and is the actual gate on what reaches storage
+class EntityRelevancePipeline:
+    def process_item(self, item, spider):
+        entity_query = getattr(spider, "entity_query", None)
+        if not entity_query:
+            return item
+
+        adapter = ItemAdapter(item)
+        # a video's own title/description may not mention the entity even
+        # when its comments do (or vice versa) - score against both so a
+        # YouTube page isn't dropped just because the entity only came up in
+        # the discussion, not the video's own metadata
+        comments_text = " ".join(c.get("text", "") for c in (adapter.get("comments") or []))
+        score_text = adapter.get("cleaned_content", "") + " " + comments_text
+        score, is_relevant, matched = entity_query.score(score_text)
+
+        if not is_relevant:
+            spider.crawler.stats.inc_value("dropped/irrelevant")
+            raise DropItem(f"Not relevant to entity '{entity_query.name}': {adapter.get('url')}")
+
+        adapter["entity"] = entity_query.name
+        adapter["relevance_score"] = score
+        adapter["matched_terms"] = matched
         return item
 
 
@@ -196,6 +270,17 @@ class StoragePipeline:
 
 
     def open_spider(self, spider):
+        # scope the output dir per entity (different entity crawls of the same
+        # seeds don't intermix corpora) and per run (spider.run_id - a fresh run
+        # gets its own folder so old retrieved content is never overwritten or
+        # appended-over; a resumed run reuses the same folder/files)
+        entity_query = getattr(spider, "entity_query", None)
+        if entity_query:
+            self.output_dir = os.path.join(self.output_dir, slugify(entity_query.name))
+        run_id = getattr(spider, "run_id", None)
+        if run_id:
+            self.output_dir = os.path.join(self.output_dir, run_id)
+
         Path(self.output_dir).mkdir(parents=True, exist_ok=True)
 
         out_path = os.path.join(self.output_dir, f"pages.jsonl")
@@ -249,6 +334,7 @@ class StoragePipeline:
         crawl_start_time = getattr(spider, "crawl_start_time", None)
         total_seconds = time.time() - crawl_start_time if crawl_start_time else None
         summary = {
+            "run_id": getattr(spider, "run_id", None),
             "finished_at": utc_timestamp(),
             "total_time": format_duration(total_seconds),
             "total_time_seconds": round(total_seconds, 2) if total_seconds is not None else None,
@@ -261,15 +347,22 @@ class StoragePipeline:
             "dropped": {
                 "duplicate": stats.get("dropped/duplicate", 0),
                 "empty": stats.get("dropped/empty", 0),
+                "irrelevant": stats.get("dropped/irrelevant", 0),
             },
+            "blocked": stats.get("blocked/pages", 0),
             "by_source": {
                 "seed": stats.get("stored/source/seed", 0),
                 "link": stats.get("stored/source/link", 0),
                 "sitemap": stats.get("stored/source/sitemap", 0),
+                "youtube_search": stats.get("stored/source/youtube_search", 0),
             },
             "tables": {
                 "pages_with_tables": stats.get("tables/pages_with_tables", 0),
                 "total_tables": stats.get("tables/total_tables", 0),
+            },
+            "youtube": {
+                "videos_with_comments": stats.get("youtube/videos_with_comments", 0),
+                "total_comments": stats.get("youtube/total_comments", 0),
             },
             "reconciliation": reconciliation,
         }
@@ -297,10 +390,21 @@ class StoragePipeline:
             "url": record["url"],
             "cleaned_content": adapter.get("cleaned_content", ""),
             "tables": adapter.get("tables", []),
+            "comments": adapter.get("comments", []),
             "source": adapter.get("source"),
         }
+        if adapter.get("entity") is not None:
+            clean_record["entity"] = adapter.get("entity")
+            clean_record["relevance_score"] = adapter.get("relevance_score")
+            clean_record["matched_terms"] = adapter.get("matched_terms")
+        if adapter.get("youtube_video") is not None:
+            clean_record["video"] = adapter.get("youtube_video")
         self.clean_file.write(json.dumps(clean_record, ensure_ascii=False) + "\n")
         self.clean_written += 1
+
+        if adapter.get("comments"):
+            spider.crawler.stats.inc_value("youtube/videos_with_comments")
+            spider.crawler.stats.inc_value("youtube/total_comments", count=len(adapter.get("comments")))
 
         source = adapter.get("source", "unknown")
         spider.crawler.stats.inc_value(f"stored/source/{source}")

@@ -22,3 +22,8 @@ class PageItems(scrapy.Item):
     tables = scrapy.Field()
     is_pdf = scrapy.Field()
     source = scrapy.Field()
+    entity = scrapy.Field()
+    relevance_score = scrapy.Field()
+    matched_terms = scrapy.Field()
+    youtube_video = scrapy.Field()
+    comments = scrapy.Field()

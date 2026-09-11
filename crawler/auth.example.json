@@ -1,0 +1,40 @@
+{
+  "_comment": "Copy this file to auth.json (gitignored) and fill in real domains. Each key is a domain from seed.txt. Only reference environment VARIABLE NAMES here - never put actual passwords/tokens in this file. Set the real values in your shell or a local, gitignored .env before running `scrapy crawl`.",
+
+  "already-logged-in.example.com": {
+    "_comment": "storage_state: reuse an existing session (cookies + localStorage) instead of logging in at all. Export it once from a real browser (or from a prior playwright_login run's save_storage_state) and point here.",
+    "method": "storage_state",
+    "storage_state": "auth/already-logged-in.example.com.json"
+  },
+
+  "plain-form-login.example.com": {
+    "_comment": "form_login: a normal <form method=post> login, no JS needed. Field names must match the <input name=...> attributes on the login page.",
+    "method": "form_login",
+    "login_url": "https://plain-form-login.example.com/login",
+    "username_field": "email",
+    "password_field": "password",
+    "username_env": "PLAIN_LOGIN_USERNAME",
+    "password_env": "PLAIN_LOGIN_PASSWORD"
+  },
+
+  "spa-login.example.com": {
+    "_comment": "playwright_login: a JS-rendered login form (React/SPA). Selectors are CSS selectors on the login page/post-login page. save_storage_state (optional) persists the session so future runs can skip straight to storage_state instead of logging in again.",
+    "method": "playwright_login",
+    "login_url": "https://spa-login.example.com/login",
+    "username_selector": "#email",
+    "password_selector": "#password",
+    "submit_selector": "button[type=submit]",
+    "success_selector": ".dashboard-home",
+    "username_env": "SPA_LOGIN_USERNAME",
+    "password_env": "SPA_LOGIN_PASSWORD",
+    "save_storage_state": "auth/spa-login.example.com.json"
+  },
+
+  "api.example.com": {
+    "_comment": "api_token: injects a header on every request to this domain - no login flow at all.",
+    "method": "api_token",
+    "header_name": "Authorization",
+    "token_format": "Bearer {token}",
+    "token_env": "API_EXAMPLE_TOKEN"
+  }
+}

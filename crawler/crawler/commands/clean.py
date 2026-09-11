@@ -4,7 +4,7 @@ import os
 
 from scrapy.commands import ScrapyCommand
 
-from crawler.pipelines import normalize_text
+from crawler.pipelines import normalize_text, slugify, resolve_run_dir
 
 MIN_LENGTH = 50
 
@@ -28,9 +28,24 @@ class Command(ScrapyCommand):
             default=MIN_LENGTH,
             help=f"drop records whose cleaned_content is shorter than this many characters (default: {MIN_LENGTH})",
         )
+        parser.add_argument(
+            "--entity",
+            default=None,
+            help="operate on output/<entity-slug>/ instead of output/ "
+                 "(must match the -a entity= used to crawl)",
+        )
+        parser.add_argument(
+            "--run",
+            default=None,
+            help="operate on a specific run id under output/[<entity-slug>/] "
+                 "(default: the most recently modified run)",
+        )
 
     def run(self, args, opts):
         output_dir = self.settings.get("OUTPUT_DIR", "output")
+        if opts.entity:
+            output_dir = os.path.join(output_dir, slugify(opts.entity))
+        output_dir = resolve_run_dir(output_dir, opts.run)
         in_path = os.path.join(output_dir, "clean.jsonl")
         out_path = os.path.join(output_dir, "clean_normalized.jsonl")
 

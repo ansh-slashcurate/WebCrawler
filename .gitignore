@@ -4,3 +4,14 @@ __pycache__/
 output/
 crawls/
 logs/
+
+# control-panel API: per-launch seed files + captured stdout (not crawl output)
+runs/
+
+# per-domain auth config and any exported browser session/credential state -
+# these can carry secrets (session cookies, tokens) or at least internal
+# login URLs, so they never belong in version control (see crawler/crawler/auth.py)
+auth.json
+auth/
+.env
+.env.example

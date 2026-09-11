@@ -1,0 +1,16 @@
+# Crawler
+Scrapy==2.18.0
+scrapy-redis==0.9.1
+scrapy-playwright==0.0.48
+playwright==1.62.0
+trafilatura==2.2.0
+pypdf==6.16.2
+redis==8.1.0
+lxml==6.1.2
+itemadapter==0.13.1
+requests==2.34.2
+python-dotenv==1.2.2
+
+# Control panel API (webapi.py)
+fastapi==0.141.1
+uvicorn[standard]==0.52.4

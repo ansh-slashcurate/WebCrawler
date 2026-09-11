@@ -1,0 +1,745 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAG Crawler</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  :root{
+    --paper:#f7f6f0; --surface:#ffffff; --surface-2:#eeece2;
+    --ink:#181b1a; --ink-soft:#565d5a; --ink-faint:#868d84;
+    --border:#e1ded2; --border-strong:#cac6b4;
+    --accent:#cc5c11; --accent-ink:#fff8f1; --accent-soft:#fbe4cd;
+    --teal:#0e6b5c; --teal-soft:#d7ece7;
+    --danger:#ab3324; --danger-soft:#f8ded7;
+    --code-bg:#191c1a; --code-ink:#f2f1e8; --code-border:#33372c;
+    --shadow:0 1px 2px rgba(24,27,26,.05), 0 14px 32px rgba(24,27,26,.09);
+    --sans:'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;
+    --mono:'IBM Plex Mono','SFMono-Regular',Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --paper:#111310; --surface:#191c19; --surface-2:#20241f;
+      --ink:#f3f2ea; --ink-soft:#b6bcaf; --ink-faint:#7d8478;
+      --border:#2d322a; --border-strong:#40473b;
+      --accent:#f0913f; --accent-ink:#1c1002; --accent-soft:#3d2a12;
+      --teal:#4bb6a0; --teal-soft:#173330;
+      --danger:#e58971; --danger-soft:#3c2620;
+      --shadow:0 1px 2px rgba(0,0,0,.4), 0 16px 36px rgba(0,0,0,.42);
+    }
+  }
+  :root[data-theme="dark"]{
+    --paper:#111310; --surface:#191c19; --surface-2:#20241f;
+    --ink:#f3f2ea; --ink-soft:#b6bcaf; --ink-faint:#7d8478;
+    --border:#2d322a; --border-strong:#40473b;
+    --accent:#f0913f; --accent-ink:#1c1002; --accent-soft:#3d2a12;
+    --teal:#4bb6a0; --teal-soft:#173330;
+    --danger:#e58971; --danger-soft:#3c2620;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 16px 36px rgba(0,0,0,.42);
+  }
+
+  *{box-sizing:border-box;}
+  @media (prefers-reduced-motion:reduce){ *{transition:none !important; animation:none !important;} }
+  html{color-scheme:light dark;}
+  body{
+    margin:0; background:var(--paper); color:var(--ink); font-family:var(--sans);
+    font-size:16px; line-height:1.65; -webkit-font-smoothing:antialiased;
+  }
+  img{max-width:100%;}
+  [hidden]{display:none !important;}
+  h1,h2,h3,h4{font-family:var(--sans); font-weight:600; text-wrap:balance; margin:0; letter-spacing:-.015em;}
+  a{color:var(--accent); text-decoration-thickness:1px; text-underline-offset:2px;}
+  a:focus-visible, button:focus-visible, summary:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+  code, pre, .mono{font-family:var(--mono);}
+  p{margin:0 0 14px; max-width:68ch;}
+  p:last-child{margin-bottom:0;}
+
+  .layout{display:grid; grid-template-columns:264px 1fr; min-height:100vh;}
+  .sidebar{
+    position:sticky; top:0; align-self:start; height:100vh; overflow-y:auto;
+    padding:34px 22px 40px; border-right:1px solid var(--border);
+  }
+  .brand{display:flex; flex-direction:column; gap:3px; margin-bottom:30px; padding-bottom:22px; border-bottom:2px solid var(--ink);}
+  .brand .mark{font-family:var(--mono); font-size:11px; letter-spacing:.14em; color:var(--teal); font-weight:600;}
+  .brand .name{font-size:20px; font-weight:700; letter-spacing:-.02em;}
+  .navgroup{margin-bottom:22px;}
+  .navgroup h5{
+    font-family:var(--mono); font-size:10.5px; letter-spacing:.13em; text-transform:uppercase;
+    color:var(--ink-faint); font-weight:600; margin:0 0 8px;
+  }
+  .navgroup a{
+    display:block; padding:6px 10px; margin:0 -10px; border-radius:6px;
+    color:var(--ink-soft); text-decoration:none; font-size:13.5px;
+    border-left:2px solid transparent; transition:background .12s ease, color .12s ease, border-color .12s ease;
+  }
+  .navgroup a:hover{background:var(--surface-2); color:var(--ink); border-left-color:var(--accent);}
+  .side-meta{
+    margin-top:28px; padding-top:20px; border-top:1px solid var(--border);
+    display:flex; flex-direction:column; gap:8px; font-size:12px; color:var(--ink-faint);
+  }
+  .side-meta .row{display:flex; justify-content:space-between; gap:10px; font-family:var(--mono);}
+  .side-meta .row b{color:var(--ink-soft); font-weight:500;}
+
+  .main{padding:60px 64px 120px; max-width:900px;}
+  header.hero{margin-bottom:64px; padding-bottom:40px; border-bottom:1px solid var(--border);}
+  header.hero .eyebrow{
+    font-family:var(--mono); font-size:11.5px; letter-spacing:.13em; text-transform:uppercase;
+    color:var(--teal); font-weight:600; margin-bottom:14px; display:block;
+  }
+  header.hero h1{font-size:2.75rem; line-height:1.08; letter-spacing:-.025em; margin-bottom:18px;}
+  header.hero .lede{font-size:17.5px; color:var(--ink-soft); max-width:58ch; margin-bottom:24px;}
+  .stackrow{display:flex; flex-wrap:wrap; gap:8px;}
+  .pill{
+    font-family:var(--mono); font-size:12px; padding:6px 13px; border-radius:99px;
+    border:1px solid var(--border-strong); color:var(--ink-soft); background:var(--surface);
+  }
+
+  section{margin:0 0 68px; scroll-margin-top:24px;}
+  section > .eyebrow{
+    display:block; font-family:var(--mono); font-size:11px; letter-spacing:.13em; text-transform:uppercase;
+    color:var(--ink-faint); font-weight:600; margin-bottom:9px;
+  }
+  section h2{font-size:1.65rem; margin-bottom:14px;}
+  section h3{font-size:1.12rem; margin:30px 0 11px;}
+  section .lede{color:var(--ink-soft); margin-bottom:24px; font-size:15.5px;}
+
+  .card{
+    background:var(--surface); border:1px solid var(--border); border-radius:12px;
+    padding:20px 22px; box-shadow:var(--shadow);
+  }
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:16px;}
+  .grid4{display:grid; grid-template-columns:repeat(4,1fr); gap:14px;}
+  @media (max-width:760px){ .grid2, .grid4{grid-template-columns:1fr;} }
+
+  .stage-card{
+    background:var(--surface); border:1px solid var(--border); border-radius:12px;
+    padding:17px 19px; display:flex; flex-direction:column; gap:8px; min-height:100%;
+    box-shadow:var(--shadow); transition:transform .14s ease, box-shadow .14s ease;
+  }
+  .stage-card:hover{transform:translateY(-2px);}
+  .stage-card .num{font-family:var(--mono); font-size:11px; color:var(--teal); font-weight:600;}
+  .stage-card h4{font-size:14.5px;}
+  .stage-card p{font-size:13.5px; color:var(--ink-soft); margin:0;}
+  .stage-card .drop{
+    margin-top:auto; padding-top:9px; border-top:1px dashed var(--border-strong);
+    font-family:var(--mono); font-size:11.5px; color:var(--danger); font-weight:500;
+  }
+
+  .method-card{
+    background:var(--surface); border:1px solid var(--border); border-radius:12px;
+    padding:18px 20px; display:flex; flex-direction:column; gap:10px;
+    box-shadow:var(--shadow); transition:transform .14s ease;
+  }
+  .method-card:hover{transform:translateY(-2px);}
+  .method-card .tag{
+    align-self:flex-start; font-family:var(--mono); font-size:11px; font-weight:600;
+    padding:3px 10px; border-radius:6px; background:var(--accent-soft); color:var(--accent);
+  }
+  .method-card h4{font-size:15.5px;}
+  .method-card p{font-size:13.5px; color:var(--ink-soft); margin:0;}
+
+  pre{
+    background:var(--code-bg); color:var(--code-ink); border:1px solid var(--code-border);
+    border-radius:11px; padding:17px 19px; overflow-x:auto; font-size:13px; line-height:1.6;
+    margin:0 0 16px; box-shadow:var(--shadow);
+  }
+  pre code{background:none; padding:0; font-size:inherit;}
+  :not(pre) > code{
+    background:var(--surface-2); border:1px solid var(--border); border-radius:4px;
+    padding:1px 6px; font-size:.88em; color:var(--ink);
+  }
+  .filetree{color:var(--code-ink);}
+  .filetree .c{color:#8a9186;}
+
+  table{width:100%; border-collapse:collapse; font-size:13.5px;}
+  th{
+    text-align:left; font-family:var(--mono); font-size:11px; letter-spacing:.06em; text-transform:uppercase;
+    color:var(--ink-faint); font-weight:600; padding:0 14px 8px 0; border-bottom:1px solid var(--border-strong);
+  }
+  td{padding:10px 14px 10px 0; border-bottom:1px solid var(--border); vertical-align:top;}
+  tr:last-child td{border-bottom:none;}
+  td code, td .mono{font-size:12.5px;}
+  .tablewrap{overflow-x:auto; border:1px solid var(--border); border-radius:12px; background:var(--surface); box-shadow:var(--shadow);}
+  .tablewrap table{margin:0;}
+  .tablewrap th{padding-left:16px;} .tablewrap td{padding-left:16px;}
+  .tablewrap th:first-child, .tablewrap td:first-child{padding-left:16px;}
+
+  .callout{
+    display:flex; gap:12px; padding:16px 18px; border-radius:10px; border:1px solid var(--border);
+    background:var(--surface); margin:0 0 16px;
+  }
+  .callout.warn{background:var(--danger-soft); border-color:transparent;}
+  .callout .mark{font-family:var(--mono); font-size:11px; font-weight:700; letter-spacing:.06em; color:var(--danger); white-space:nowrap; padding-top:2px;}
+  .callout p{margin:0; font-size:13.5px; color:var(--ink-soft);}
+  .callout.warn p{color:var(--ink);}
+
+  .limits{display:flex; flex-direction:column; gap:14px;}
+  .limits .item{display:grid; grid-template-columns:180px 1fr; gap:16px; padding:14px 0; border-top:1px solid var(--border);}
+  .limits .item:first-child{border-top:none; padding-top:0;}
+  .limits .item h4{font-size:13.5px; color:var(--ink);}
+  .limits .item p{font-size:13.5px; color:var(--ink-soft); margin:0;}
+  @media (max-width:640px){ .limits .item{grid-template-columns:1fr; gap:4px;} }
+
+  figure{margin:0 0 12px;}
+  figure .svgwrap{overflow-x:auto; border:1px solid var(--border); border-radius:14px; background:var(--surface-2); box-shadow:var(--shadow); padding:22px;}
+  figure svg{display:block; width:100%; max-width:620px; height:auto; min-width:460px; margin:0 auto;}
+  figcaption{font-size:12.5px; color:var(--ink-faint); margin-top:12px; max-width:68ch;}
+
+  hr.rule{border:none; border-top:1px solid var(--border); margin:0 0 64px;}
+  footer{padding:28px 64px 64px; color:var(--ink-faint); font-size:12.5px; border-top:1px solid var(--border);}
+
+  @media (max-width:860px){
+    .layout{grid-template-columns:1fr;}
+    .sidebar{position:static; height:auto; overflow-y:visible; overflow-x:auto; white-space:nowrap; border-right:none; border-bottom:1px solid var(--border); padding:14px 18px;}
+    .brand{margin-bottom:14px;}
+    .sidebar .navgroups{display:flex; gap:22px;}
+    .navgroup{margin-bottom:0;}
+    .side-meta{display:none;}
+    .main{padding:32px 22px 80px;}
+    footer{padding:24px 22px 48px;}
+  }
+</style>
+</head>
+<body>
+
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="mark">SCRAPY · rag_crawler</span>
+      <span class="name">RAG Crawler</span>
+    </div>
+    <div class="navgroups">
+      <div class="navgroup">
+        <h5>Guide</h5>
+        <a href="#overview">Overview</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#quickstart">Quickstart</a>
+      </div>
+      <div class="navgroup">
+        <h5>Crawling</h5>
+        <a href="#entity">Entity-focused crawling</a>
+        <a href="#auth">Authentication</a>
+        <a href="#challenges">Bot-challenge handling</a>
+      </div>
+      <div class="navgroup">
+        <h5>Reference</h5>
+        <a href="#output">Output structure</a>
+        <a href="#cli">CLI reference</a>
+        <a href="#settings">Settings reference</a>
+        <a href="#logging">Logging</a>
+        <a href="#limitations">Known limitations</a>
+      </div>
+    </div>
+    <div class="side-meta">
+      <div class="row"><span>spider</span><b>rag_crawler</b></div>
+      <div class="row"><span>Scrapy</span><b>2.18</b></div>
+      <div class="row"><span>scrapy-redis</span><b>0.9.1</b></div>
+      <div class="row"><span>scrapy-playwright</span><b>0.0.48</b></div>
+      <div class="row"><span>trafilatura</span><b>2.2</b></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="hero">
+      <span class="eyebrow">Developer docs</span>
+      <h1>A crawler that knows when to stop reading.</h1>
+      <p class="lede">
+        <code>rag_crawler</code> is a Scrapy spider that turns a list of seed URLs into a clean,
+        RAG-ready corpus. Point it at a whole site for full coverage, or hand it an entity and it
+        prunes itself down to only the pages that mention it — logging into gated sites,
+        riding out bot walls, and keeping every crawl's output separate from the last.
+      </p>
+      <div class="stackrow">
+        <span class="pill">Scrapy 2.18</span>
+        <span class="pill">scrapy-redis (frontier)</span>
+        <span class="pill">scrapy-playwright (JS + auth)</span>
+        <span class="pill">trafilatura (extraction)</span>
+        <span class="pill">Redis</span>
+      </div>
+    </header>
+
+    <!-- OVERVIEW -->
+    <section id="overview">
+      <span class="eyebrow">01 · Orientation</span>
+      <h2>What this is, and isn't</h2>
+      <p class="lede">
+        Give it <code>seed.txt</code> and it link-follows outward (plus sitemap discovery) up to
+        <code>max_depth</code>, fetching plain HTTP first and escalating to a real Playwright
+        browser only when a page turns out to need JS or is behind a login. Every page passes
+        through four ordered pipeline stages — dedup, extraction, relevance, storage — before it
+        reaches disk as a line in <code>clean.jsonl</code>.
+      </p>
+      <p>
+        It does not solve CAPTCHAs, bypass paywalls, or defeat 2FA. Authentication support
+        (<a href="#auth">below</a>) is for sites you already have legitimate access to; bot-wall
+        handling (<a href="#challenges">below</a>) detects and logs what it can't get past rather
+        than trying to force it.
+      </p>
+    </section>
+
+    <!-- ARCHITECTURE -->
+    <section id="architecture">
+      <span class="eyebrow">02 · How a page moves through it</span>
+      <h2>Architecture</h2>
+      <p class="lede">
+        One request's path from the frontier to <code>clean.jsonl</code> — and the three places
+        along the way it can get dropped instead.
+      </p>
+
+      <figure>
+        <div class="svgwrap">
+          <svg viewBox="0 0 860 690" role="img" aria-label="Diagram: seed.txt and sitemap.xml feed a Redis-backed Scheduler, which the spider's parse() dequeues from, fetching plain HTTP and escalating to Playwright when a page is empty or bot-challenged. A page still challenged after one retry is logged to blocked.jsonl instead of continuing. Everything else flows right through four ordered pipeline stages — ContentDedup, Normalization, EntityRelevance, Storage — the first three of which can drop the item as duplicate, empty, or irrelevant before it reaches the output folder.">
+            <defs>
+              <marker id="arrow-neutral" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+                <path d="M0,0 L10,5 L0,10 z" fill="var(--ink-faint)"/>
+              </marker>
+              <marker id="arrow-danger" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+                <path d="M0,0 L10,5 L0,10 z" fill="var(--danger)"/>
+              </marker>
+              <marker id="arrow-accent" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+                <path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/>
+              </marker>
+              <marker id="arrow-teal" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+                <path d="M0,0 L10,5 L0,10 z" fill="var(--teal)"/>
+              </marker>
+            </defs>
+            <g font-family="IBM Plex Sans, sans-serif">
+
+              <!-- Discovery -->
+              <rect x="310" y="20" width="240" height="80" rx="10" fill="var(--surface)" stroke="var(--border-strong)"/>
+              <text x="430" y="47" text-anchor="middle" font-weight="600" font-size="14" fill="var(--ink)">Discovery</text>
+              <text x="430" y="66" text-anchor="middle" font-size="11" font-family="IBM Plex Mono, monospace" fill="var(--ink-soft)">seed.txt</text>
+              <text x="430" y="82" text-anchor="middle" font-size="11" font-family="IBM Plex Mono, monospace" fill="var(--ink-soft)">sitemap.xml · robots.txt</text>
+
+              <line x1="430" y1="100" x2="430" y2="128" stroke="var(--ink-faint)" stroke-width="1.5" marker-end="url(#arrow-neutral)"/>
+
+              <!-- Scheduler -->
+              <rect x="310" y="132" width="240" height="80" rx="10" fill="var(--surface)" stroke="var(--border-strong)"/>
+              <text x="430" y="159" text-anchor="middle" font-weight="600" font-size="14" fill="var(--ink)">Scheduler</text>
+              <text x="430" y="178" text-anchor="middle" font-size="11" fill="var(--ink-soft)">Redis-backed frontier</text>
+              <text x="430" y="194" text-anchor="middle" font-size="11" fill="var(--ink-soft)">priority queue · persisted</text>
+
+              <!-- Redis, side note off Scheduler -->
+              <line x1="550" y1="172" x2="604" y2="172" stroke="var(--teal)" stroke-width="1.5" stroke-dasharray="2 4" marker-end="url(#arrow-teal)"/>
+              <rect x="608" y="134" width="212" height="76" rx="10" fill="var(--teal-soft)" stroke="var(--teal)"/>
+              <text x="714" y="159" text-anchor="middle" font-weight="600" font-size="13" fill="var(--teal)">Redis</text>
+              <text x="714" y="177" text-anchor="middle" font-size="10.5" fill="var(--teal)">frontier · dupefilter</text>
+              <text x="714" y="193" text-anchor="middle" font-size="10.5" fill="var(--teal)">content_hashes · run_id</text>
+
+              <line x1="430" y1="212" x2="430" y2="240" stroke="var(--ink-faint)" stroke-width="1.5" marker-end="url(#arrow-neutral)"/>
+
+              <!-- parse() -->
+              <rect x="290" y="244" width="280" height="80" rx="10" fill="var(--surface)" stroke="var(--border-strong)"/>
+              <text x="430" y="271" text-anchor="middle" font-weight="600" font-size="14" font-family="IBM Plex Mono, monospace" fill="var(--ink)">parse()</text>
+              <text x="430" y="290" text-anchor="middle" font-size="11" fill="var(--ink-soft)">plain HTTP fetch first</text>
+              <text x="430" y="306" text-anchor="middle" font-size="11" fill="var(--ink-soft)">→ Playwright if empty, JS-only, or gated</text>
+
+              <!-- blocked branch, side note off parse() -->
+              <line x1="570" y1="284" x2="604" y2="284" stroke="var(--danger)" stroke-width="1.5" marker-end="url(#arrow-danger)"/>
+              <text x="587" y="276" text-anchor="middle" font-size="9.5" fill="var(--danger)">retry failed</text>
+              <rect x="608" y="248" width="212" height="72" rx="10" fill="var(--danger-soft)" stroke="var(--danger)"/>
+              <text x="714" y="272" text-anchor="middle" font-weight="600" font-size="13" fill="var(--danger)">blocked.jsonl</text>
+              <text x="714" y="290" text-anchor="middle" font-size="10.5" fill="var(--danger)">still challenged after 1 retry</text>
+              <text x="714" y="305" text-anchor="middle" font-size="10.5" fill="var(--danger)">logged, never stored</text>
+
+              <line x1="430" y1="324" x2="430" y2="356" stroke="var(--ink-faint)" stroke-width="1.5" marker-end="url(#arrow-neutral)"/>
+              <text x="446" y="344" font-size="10.5" font-family="IBM Plex Mono, monospace" fill="var(--ink-faint)">PageItems</text>
+
+              <!-- pipeline row -->
+              <rect x="40" y="360" width="176" height="88" rx="10" fill="var(--surface)" stroke="var(--border-strong)"/>
+              <text x="128" y="384" text-anchor="middle" font-size="10.5" font-family="IBM Plex Mono, monospace" font-weight="600" fill="var(--teal)">100</text>
+              <text x="128" y="402" text-anchor="middle" font-weight="600" font-size="13" fill="var(--ink)">ContentDedup</text>
+              <text x="128" y="419" text-anchor="middle" font-size="10.5" font-family="IBM Plex Mono, monospace" fill="var(--ink-soft)">sha256(html)</text>
+
+              <line x1="216" y1="404" x2="238" y2="404" stroke="var(--ink-faint)" stroke-width="1.5" marker-end="url(#arrow-neutral)"/>
+
+              <rect x="242" y="360" width="176" height="88" rx="10" fill="var(--surface)" stroke="var(--border-strong)"/>
+              <text x="330" y="384" text-anchor="middle" font-size="10.5" font-family="IBM Plex Mono, monospace" font-weight="600" fill="var(--teal)">150</text>
+              <text x="330" y="402" text-anchor="middle" font-weight="600" font-size="13" fill="var(--ink)">Normalization</text>
+              <text x="330" y="419" text-anchor="middle" font-size="10.5" font-family="IBM Plex Mono, monospace" fill="var(--ink-soft)">trafilatura + tables</text>
+
+              <line x1="418" y1="404" x2="440" y2="404" stroke="var(--ink-faint)" stroke-width="1.5" marker-end="url(#arrow-neutral)"/>
+
+              <rect x="444" y="360" width="176" height="88" rx="10" fill="var(--surface)" stroke="var(--border-strong)"/>
+              <text x="532" y="384" text-anchor="middle" font-size="10.5" font-family="IBM Plex Mono, monospace" font-weight="600" fill="var(--teal)">175</text>
+              <text x="532" y="402" text-anchor="middle" font-weight="600" font-size="13" fill="var(--ink)">EntityRelevance</text>
+              <text x="532" y="419" text-anchor="middle" font-size="10.5" font-family="IBM Plex Mono, monospace" fill="var(--ink-soft)">no-op if no entity</text>
+
+              <line x1="620" y1="404" x2="642" y2="404" stroke="var(--ink-faint)" stroke-width="1.5" marker-end="url(#arrow-neutral)"/>
+
+              <rect x="646" y="360" width="176" height="88" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/>
+              <text x="734" y="384" text-anchor="middle" font-size="10.5" font-family="IBM Plex Mono, monospace" font-weight="600" fill="var(--accent)">200</text>
+              <text x="734" y="402" text-anchor="middle" font-weight="600" font-size="13" fill="var(--ink)">Storage</text>
+              <text x="734" y="419" text-anchor="middle" font-size="10.5" font-family="IBM Plex Mono, monospace" fill="var(--ink-soft)">writes pages/clean.jsonl</text>
+
+              <!-- drop stubs -->
+              <line x1="128" y1="448" x2="128" y2="480" stroke="var(--danger)" stroke-width="1.5" marker-end="url(#arrow-danger)"/>
+              <line x1="330" y1="448" x2="330" y2="480" stroke="var(--danger)" stroke-width="1.5" marker-end="url(#arrow-danger)"/>
+              <line x1="532" y1="448" x2="532" y2="480" stroke="var(--danger)" stroke-width="1.5" marker-end="url(#arrow-danger)"/>
+
+              <rect x="40" y="484" width="580" height="52" rx="10" fill="var(--danger-soft)" stroke="var(--danger)" stroke-dasharray="3 4"/>
+              <text x="128" y="504" text-anchor="middle" font-size="11" font-weight="600" fill="var(--danger)">duplicate</text>
+              <text x="330" y="504" text-anchor="middle" font-size="11" font-weight="600" fill="var(--danger)">empty</text>
+              <text x="532" y="504" text-anchor="middle" font-size="11" font-weight="600" fill="var(--danger)">irrelevant</text>
+              <text x="330" y="524" text-anchor="middle" font-size="10.5" font-family="IBM Plex Mono, monospace" fill="var(--danger)">→ logged as "Dropped: &lt;reason&gt;: &lt;url&gt;", item discarded</text>
+
+              <!-- storage → output -->
+              <line x1="734" y1="448" x2="734" y2="566" stroke="var(--accent)" stroke-width="1.5" marker-end="url(#arrow-accent)"/>
+
+              <rect x="624" y="570" width="220" height="84" rx="10" fill="var(--surface)" stroke="var(--accent)"/>
+              <text x="734" y="596" text-anchor="middle" font-weight="600" font-size="12.5" font-family="IBM Plex Mono, monospace" fill="var(--ink)">output/&lt;entity&gt;/&lt;run_id&gt;/</text>
+              <text x="734" y="616" text-anchor="middle" font-size="10.5" fill="var(--ink-soft)">pages.jsonl · clean.jsonl</text>
+              <text x="734" y="632" text-anchor="middle" font-size="10.5" fill="var(--ink-soft)">summary.json · blocked.jsonl</text>
+              <text x="734" y="648" text-anchor="middle" font-size="10" fill="var(--ink-faint)">one line per stored page</text>
+            </g>
+          </svg>
+        </div>
+        <figcaption>
+          One page's route from the frontier down to the output folder, with the three places it
+          can be dropped along the way and the one place (a bot wall) it can be turned away before
+          that. Priorities 100–200 are the exact <code>ITEM_PIPELINES</code> order in <code>settings.py</code>.
+        </figcaption>
+      </figure>
+
+      <h3>The four pipeline stages</h3>
+      <div class="grid4">
+        <div class="stage-card">
+          <span class="num">100 · ContentDedupPipeline</span>
+          <h4>Content dedup</h4>
+          <p>SHA-256 of the raw HTML, atomically SADD'd into a Redis set scoped to this entity+run. Two workers hashing the same page at once still only let one through.</p>
+          <div class="drop">drops on: exact duplicate content</div>
+        </div>
+        <div class="stage-card">
+          <span class="num">150 · NormalizationPipeline</span>
+          <h4>Extraction</h4>
+          <p>trafilatura (<code>favor_recall=True</code>) pulls prose out of the HTML; tables are extracted separately as row dicts so they never get flattened into text.</p>
+          <div class="drop">drops on: no content and no tables</div>
+        </div>
+        <div class="stage-card">
+          <span class="num">175 · EntityRelevancePipeline</span>
+          <h4>Relevance gate</h4>
+          <p>A no-op unless the crawl was started with <code>-a entity=</code>. Re-scores <code>cleaned_content</code> against the entity query — the actual gate on what reaches storage.</p>
+          <div class="drop">drops on: entity not mentioned</div>
+        </div>
+        <div class="stage-card">
+          <span class="num">200 · StoragePipeline</span>
+          <h4>Storage</h4>
+          <p>Appends to <code>pages.jsonl</code> and <code>clean.jsonl</code> under this run's output folder, then re-counts both files on close to catch silent data loss.</p>
+          <div class="drop" style="color:var(--teal)">writes: pages.jsonl, clean.jsonl</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- QUICKSTART -->
+    <section id="quickstart">
+      <span class="eyebrow">03 · First crawl</span>
+      <h2>Quickstart</h2>
+      <p class="lede">Redis and a Chromium install are the only two things this needs beyond the Python deps.</p>
+      <pre><code>cd crawler
+pip install scrapy scrapy-redis scrapy-playwright trafilatura pypdf redis lxml
+playwright install chromium
+
+# start Redis (already running on localhost:6379 assumed by settings.py)
+redis-server &amp;
+
+# one URL per line
+echo "https://example.com/" &gt; seed.txt
+
+scrapy crawl rag_crawler</code></pre>
+      <p>
+        Output lands in <code>output/&lt;run_id&gt;/</code> (no entity given → no entity-slug
+        folder). Every run gets its own folder — see <a href="#output">Output structure</a>.
+      </p>
+    </section>
+
+    <!-- ENTITY -->
+    <section id="entity">
+      <span class="eyebrow">04 · Focused crawling</span>
+      <h2>Entity-focused crawling</h2>
+      <p class="lede">
+        Hand it a name and the crawl stops behaving like a full-site archiver and starts
+        behaving like a search: it still walks the site, but only keeps — and only keeps
+        following — the parts that are actually about the entity.
+      </p>
+      <pre><code># name only
+scrapy crawl rag_crawler -a entity="Shashi"
+
+# name + aliases + disambiguating context (all optional, independent)
+scrapy crawl rag_crawler \
+  -a entity="John Smith" \
+  -a aliases="J. Smith,Johnny Smith" \
+  -a context="CFO,Acme Corp"</code></pre>
+
+      <h3>The matching rule</h3>
+      <p>
+        Word-boundary, case-insensitive regex — no embeddings, no LLM call per page. A page is
+        relevant if it mentions the <b>name or an alias</b>, <b>and</b> (only if context terms were
+        given) <b>at least one context term</b>. Context is what tells your John Smith apart from
+        every other one on the site. Score = <code>name_hits×2 + context_hits</code>, used to
+        prioritize which link gets fetched next.
+      </p>
+
+      <h3>How the frontier prunes itself</h3>
+      <p>
+        Each request carries an <code>irrelevant_streak</code> forward through its meta. A
+        relevant page resets it to 0; an irrelevant one increments it. Once a branch hits
+        <code>max_irrelevant_streak</code> (default <code>2</code>) with no hit, the spider stops
+        following links from it — even if <code>max_depth</code> hasn't been reached yet. Anchor
+        text that already mentions the entity gets a higher <code>Request(priority=…)</code>, so
+        promising links are dequeued before filler pages.
+      </p>
+
+      <h3>Per-entity isolation</h3>
+      <p>
+        <code>output/</code>, the content-dedup set, and the URL dupefilter are all scoped by
+        <code>slugify(entity)</code>, so crawling <code>"Shashi"</code> and <code>"Neeraj"</code>
+        against the same <code>seed.txt</code> never mix corpora or wrongly dedupe one entity's
+        page against another's.
+      </p>
+    </section>
+
+    <!-- AUTH -->
+    <section id="auth">
+      <span class="eyebrow">05 · Gated content</span>
+      <h2>Authentication</h2>
+      <p class="lede">
+        For sites you already have legitimate access to — your own subscription, an internal
+        tool, an authorized engagement. Not a CAPTCHA or paywall bypass: a login that needs a
+        second factor will simply time out and get logged as a failed login.
+      </p>
+
+      <div class="grid2">
+        <div class="method-card">
+          <span class="tag">storage_state</span>
+          <h4>Reuse a session</h4>
+          <p>Loads cookies + localStorage exported from a real browser (or a prior <code>playwright_login</code> run) into a named Playwright context. No login flow runs at all.</p>
+        </div>
+        <div class="method-card">
+          <span class="tag">form_login</span>
+          <h4>Plain HTML form</h4>
+          <p>Two-hop GET+POST via <code>FormRequest.from_response()</code>. Scrapy's cookie jar carries the resulting session through every later request — no Playwright needed.</p>
+        </div>
+        <div class="method-card">
+          <span class="tag">playwright_login</span>
+          <h4>JS-rendered login</h4>
+          <p>Fills fields and clicks submit in a real browser, waits for a success selector. Can save <code>storage_state</code> afterward so future runs skip straight to method 1.</p>
+        </div>
+        <div class="method-card">
+          <span class="tag">api_token</span>
+          <h4>Token / API key</h4>
+          <p>A downloader middleware injects a header (<code>Authorization</code>, <code>X-API-Key</code>, …) on every request to the domain. No login step at all.</p>
+        </div>
+      </div>
+
+      <h3>auth.json</h3>
+      <p>
+        One entry per domain from <code>seed.txt</code>, in <code>crawler/auth.json</code>
+        (gitignored — copy it from <code>auth.example.json</code>). It only ever references
+        <b>environment variable names</b>, never the credentials themselves:
+      </p>
+      <pre><code>{
+  "app.example.com": {
+    "method": "playwright_login",
+    "login_url": "https://app.example.com/login",
+    "username_selector": "#email",
+    "password_selector": "#password",
+    "submit_selector": "button[type=submit]",
+    "success_selector": ".dashboard-home",
+    "username_env": "APP_USERNAME",
+    "password_env": "APP_PASSWORD",
+    "save_storage_state": "auth/app.example.com.json"
+  }
+}</code></pre>
+      <p>
+        Missing env var, missing <code>storage_state</code> file, or an unknown <code>method</code>
+        all raise <code>AuthError</code> at spider startup — before a single request goes out,
+        not mid-crawl on the first page that needed it.
+      </p>
+    </section>
+
+    <!-- CHALLENGES -->
+    <section id="challenges">
+      <span class="eyebrow">06 · Bot walls</span>
+      <h2>Bot-challenge handling</h2>
+      <p class="lede">
+        <code>crawler/challenge.py</code> matches response status and body against known
+        interstitial markers before anything else touches the page — so a Cloudflare
+        "checking your browser" screen never gets mistaken for real content.
+      </p>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>Signal</th><th>Matches</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">status</td><td>403, 429, 503 <span style="color:var(--ink-faint)">(also whitelisted via <code>HTTPERROR_ALLOWED_CODES</code> so they reach <code>parse()</code> at all)</span></td></tr>
+            <tr><td class="mono">Cloudflare</td><td>"checking your browser", "just a moment", <code>cf-browser-verification</code>, <code>cf_chl_opt</code>, <code>cf-turnstile</code></td></tr>
+            <tr><td class="mono">CAPTCHA</td><td><code>g-recaptcha</code>, <code>hcaptcha.com</code>, "verify you are human", GeeTest</td></tr>
+            <tr><td class="mono">Bot-mitigation</td><td><code>captcha-delivery.com</code> (DataDome), <code>px-captcha</code> (PerimeterX)</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>One retry, then stop</h3>
+      <p>
+        First hit → one retry via Playwright with a 5s extra wait, which resolves the
+        auto-passing JS-only kind (no human action needed, just time). Still challenged after
+        that → logged to <code>blocked.jsonl</code> and the spider moves on. No infinite
+        retries, no content stored, no link-following into the walled-off page.
+      </p>
+    </section>
+
+    <!-- OUTPUT -->
+    <section id="output">
+      <span class="eyebrow">07 · Where things land</span>
+      <h2>Output structure</h2>
+      <p class="lede">
+        Every crawl invocation gets its own folder — a crash that leaves the Redis frontier
+        non-empty resumes into the <em>same</em> one; anything else gets a new <code>run_id</code>
+        (<code>YYYYMMDD_HHMMSS_PID</code>), so old retrieved content is never overwritten.
+      </p>
+      <pre class="filetree"><code>output/
+└── john_smith/                    <span class="c"># slugify(entity) — omitted entirely if no -a entity=</span>
+    └── 20260908_124554_18996/     <span class="c"># run_id — fresh per crawl, reused on resume</span>
+        ├── pages.jsonl            <span class="c"># raw html + content_hash, one line per stored page</span>
+        ├── clean.jsonl            <span class="c"># cleaned_content + tables (+ entity fields)</span>
+        ├── blocked.jsonl          <span class="c"># bot-challenge pages that never resolved</span>
+        └── summary.json           <span class="c"># fetched/stored/dropped/blocked + reconciliation</span></code></pre>
+
+      <h3>clean.jsonl fields</h3>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>Field</th><th>Present when</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">url, source</td><td>always</td><td><code>source</code> is <code>seed</code> / <code>sitemap</code> / <code>link</code></td></tr>
+            <tr><td class="mono">cleaned_content</td><td>always</td><td>trafilatura output, whitespace-normalized</td></tr>
+            <tr><td class="mono">tables</td><td>always (may be <code>[]</code>)</td><td>list of row-dicts, one list per <code>&lt;table&gt;</code></td></tr>
+            <tr><td class="mono">entity, relevance_score, matched_terms</td><td>entity mode only</td><td>set by <code>EntityRelevancePipeline</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- CLI -->
+    <section id="cli">
+      <span class="eyebrow">08 · Commands</span>
+      <h2>CLI reference</h2>
+
+      <h3><code>scrapy crawl rag_crawler</code></h3>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>Arg</th><th>Default</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">seeds</td><td class="mono">seed.txt</td><td>newline-delimited seed URLs</td></tr>
+            <tr><td class="mono">max_depth</td><td class="mono">2</td><td>link-following depth cap from each seed</td></tr>
+            <tr><td class="mono">use_sitemap</td><td class="mono">True</td><td>also discover URLs via robots.txt / sitemap.xml</td></tr>
+            <tr><td class="mono">entity</td><td class="mono">—</td><td>enables entity-focused mode (see above)</td></tr>
+            <tr><td class="mono">aliases, context</td><td class="mono">""</td><td>comma-separated, both optional</td></tr>
+            <tr><td class="mono">max_irrelevant_streak</td><td class="mono">2</td><td>consecutive off-topic pages before pruning a branch</td></tr>
+            <tr><td class="mono">auth_config</td><td class="mono">auth.json</td><td>path to the per-domain auth config</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3><code>scrapy reset</code></h3>
+      <p>Clears the Redis frontier, dupefilter, run marker, and dedup set for a fresh crawl.</p>
+      <div class="tablewrap">
+        <table>
+          <tbody>
+            <tr><td class="mono">--entity</td><td>scope the reset to one entity instead of the default/shared scope</td></tr>
+            <tr><td class="mono">--keep-output</td><td>clear Redis state only — leaves every run's <code>*.jsonl</code> on disk</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3><code>scrapy reprocess</code> · <code>scrapy export_txt</code> · <code>scrapy clean</code></h3>
+      <p>
+        All three default to whichever run folder was modified most recently; pass
+        <code>--entity</code> and/or <code>--run &lt;run_id&gt;</code> to target a specific one.
+      </p>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>Command</th><th>Does</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">reprocess</td><td>re-derives <code>clean.jsonl</code> from <code>pages.jsonl</code>'s raw html — use after fixing extraction/normalization logic, since it re-extracts from source rather than re-cleaning already-cleaned text. <code>--min-length</code> (default 50) drops short, tableless records.</td></tr>
+            <tr><td class="mono">export_txt</td><td>flattens <code>clean.jsonl</code> into one <code>corpus.txt</code>, <code>SOURCE: &lt;url&gt;</code>-delimited, for RAG ingestion/testing. <code>--in</code> / <code>--out</code> override filenames.</td></tr>
+            <tr><td class="mono">clean</td><td>backfill: re-normalizes an existing <code>clean.jsonl</code> into <code>clean_normalized.jsonl</code>, dropping anything under <code>--min-length</code>.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- SETTINGS -->
+    <section id="settings">
+      <span class="eyebrow">09 · Configuration</span>
+      <h2>Settings reference</h2>
+      <p class="lede">The knobs in <code>crawler/settings.py</code> most worth knowing about.</p>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>Setting</th><th>Value</th><th>Why</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">CLOSESPIDER_PAGECOUNT</td><td class="mono">400</td><td>hard stop so a misconfigured seed/domain can't run away</td></tr>
+            <tr><td class="mono">DOWNLOAD_DELAY / CONCURRENT_REQUESTS_PER_DOMAIN</td><td class="mono">1 / 1</td><td>politeness — one request per domain per second</td></tr>
+            <tr><td class="mono">HTTPERROR_ALLOWED_CODES</td><td class="mono">[403, 429, 503]</td><td>lets bot-challenge pages reach <code>parse()</code> instead of being silently dropped</td></tr>
+            <tr><td class="mono">LOG_FORMATTER</td><td class="mono">CrawlerLogFormatter</td><td>redacts the raw <code>html</code> field out of "Scraped"/"Dropped" log lines</td></tr>
+            <tr><td class="mono">SCHEDULER / DUPEFILTER_CLASS</td><td class="mono">scrapy_redis</td><td>Redis-backed frontier — survives a crash/restart, splittable across workers</td></tr>
+            <tr><td class="mono">SCHEDULER_PERSIST</td><td class="mono">True</td><td>frontier isn't wiped between separate <code>scrapy crawl</code> invocations</td></tr>
+            <tr><td class="mono">DOWNLOAD_HANDLERS</td><td class="mono">scrapy_playwright</td><td>routes http(s) through a real Chromium when needed</td></tr>
+            <tr><td class="mono">DOWNLOADER_MIDDLEWARES</td><td class="mono">ApiTokenAuthMiddleware · 400</td><td>injects the <code>api_token</code> auth header per request</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- LOGGING -->
+    <section id="logging">
+      <span class="eyebrow">10 · Observability</span>
+      <h2>Logging</h2>
+      <p class="lede">
+        Every invocation writes its own timestamped file to <code>logs/crawl_&lt;ts&gt;_&lt;pid&gt;.log</code>,
+        in addition to stdout.
+      </p>
+      <p>
+        Every page that gets fetched-but-discarded logs a line starting <code>Dropped:</code> —
+        duplicate content, empty extraction, entity-irrelevant, non-HTML content type, a
+        non-HTML sitemap entry — so <code>grep "Dropped:" logs/crawl_….log</code> surfaces the
+        full picture in one place. The raw <code>html</code> field never appears in the log; it's
+        redacted to a length placeholder by <code>CrawlerLogFormatter</code>.
+      </p>
+    </section>
+
+    <!-- LIMITATIONS -->
+    <section id="limitations">
+      <span class="eyebrow">11 · Read before relying on this</span>
+      <h2>Known limitations</h2>
+      <div class="callout warn">
+        <span class="mark">Heads up</span>
+        <p>Nothing here is a bug so much as a scope boundary — worth knowing before you hit it.</p>
+      </div>
+      <div class="limits">
+        <div class="item">
+          <h4>Frontier isn't entity-scoped</h4>
+          <p>The Redis request queue and URL dupefilter are shared per spider name, not per entity. Two different entity crawls of the same <code>seed.txt</code> back-to-back can collide — run <code>scrapy reset</code> between them.</p>
+        </div>
+        <div class="item">
+          <h4>No 2FA / CAPTCHA in login flows</h4>
+          <p><code>playwright_login</code> assumes a straight-through submit. A second factor just times out waiting for <code>success_selector</code> and logs as a failed login.</p>
+        </div>
+        <div class="item">
+          <h4>PDFs are skipped, not extracted</h4>
+          <p>Only <code>text/html</code> responses are handled. A PDF (or any other binary) is fetched, logged as <code>Dropped: non-HTML content</code>, and discarded.</p>
+        </div>
+        <div class="item">
+          <h4>robots.txt / sitemap.xml fetch unauthenticated</h4>
+          <p>Discovery requests to those two URLs don't carry auth — usually fine, since they're meant for public search-engine discovery even on gated sites. The pages they list do carry auth.</p>
+        </div>
+      </div>
+    </section>
+
+    <hr class="rule">
+    <footer style="border:none; padding:0; margin-top:-40px;">
+      Spider name <code>rag_crawler</code> · project root <code>crawler/</code> · this page describes the codebase as of the auth + entity-focus + run-scoping work.
+    </footer>
+  </main>
+</div>
+
+</body>
+</html>

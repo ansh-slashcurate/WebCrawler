@@ -3,10 +3,28 @@
 # See documentation in:
 # https://docs.scrapy.org/en/latest/topics/spider-middleware.html
 
+from urllib.parse import urlparse
+
 from scrapy import signals
 
 # useful for handling different item types with a single interface
 from itemadapter import ItemAdapter
+
+
+class ApiTokenAuthMiddleware:
+    """Injects an Authorization/API-key header on every request to a domain
+    configured for token-based auth (see crawler.auth / auth.json) - lets
+    token/API-gated content be crawled with no login flow at all."""
+
+    def process_request(self, request, spider):
+        auth_config = getattr(spider, "auth_config", None)
+        if not auth_config:
+            return None
+        profile = auth_config.get(urlparse(request.url).netloc)
+        if not profile or profile.method != "api_token":
+            return None
+        request.headers[profile.header_name] = profile.token_header_value()
+        return None
 
 
 class CrawlerSpiderMiddleware:
