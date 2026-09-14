@@ -367,6 +367,15 @@ def start_crawl(req: CrawlRequest):
     if not seeds:
         raise HTTPException(400, "at least one seed URL is required")
 
+    # The spider deliberately uses one persistent Redis frontier. Launching a
+    # second local crawl against it causes both processes to consume the same
+    # queue and interleave their shared daily log, which made diagnosis and
+    # shutdown recovery unreliable. This control plane runs one local crawl at
+    # a time; distributed workers should use deliberately isolated queues.
+    active_tokens = [token for token, job in JOBS.items() if job["process"].poll() is None]
+    if active_tokens:
+        raise HTTPException(409, "a crawl is already running; wait for it to finish before starting another")
+
     token = uuid.uuid4().hex[:12]
     job_dir = RUNS_DIR / token
     job_dir.mkdir(parents=True, exist_ok=True)

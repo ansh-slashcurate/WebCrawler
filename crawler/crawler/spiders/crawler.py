@@ -25,12 +25,17 @@ import redis
 import trafilatura
 from scrapy_playwright.page import PageMethod
 
-PLAYWRIGHT_WAIT = [PageMethod("wait_for_load_state", "networkidle")]
+# Do not attach a PageMethod to ordinary rendered-page retries. In this
+# scrapy-playwright version every PageMethod is followed internally by another
+# ``page.wait_for_load_state()`` using the *load* state. News sites often never
+# reach that state because ads and analytics keep resources open. The request's
+# goto kwargs below use ``domcontentloaded`` instead, then capture the DOM.
+PLAYWRIGHT_WAIT = ()
 # Cloudflare-style "checking your browser" interstitials are pure JS/timing
-# based (no human action needed) but often take a few seconds longer than
-# networkidle alone waits for - give them one retry with extra time before
-# concluding the challenge is a real (non-auto-resolving) block.
-PLAYWRIGHT_CHALLENGE_WAIT = PLAYWRIGHT_WAIT + [PageMethod("wait_for_timeout", 5000)]
+# based (no human action needed). The retry uses the same DOM-ready navigation
+# as other rendered requests; avoiding PageMethod also avoids its hidden full
+# load-state wait (described above).
+PLAYWRIGHT_CHALLENGE_WAIT = ()
 # a plain (non-JS) fetch of a JS-rendered page (e.g. YouTube) often isn't
 # literally empty - it still has the site-wide header/footer chrome baked into
 # the static HTML, while the actual page content (video title/description,
@@ -146,10 +151,6 @@ class WebsiteSpider(scrapy.Spider):
             deny_extensions=DENY_EXTENSIONS,
         )
 
-        # domains confirmed (by an earlier page on that domain) to need
-        # playwright - subsequent pages on that domain skip straight to it
-        self.js_domains = set()
-
         self.crawl_start_time = time.time()
 
     def closed(self, reason):
@@ -170,6 +171,24 @@ class WebsiteSpider(scrapy.Spider):
 
         self.logger.warning("Blocked/challenge page skipped: %s (%s)", url, reason)
         self.crawler.stats.inc_value("blocked/pages")
+
+    @staticmethod
+    def _playwright_retry_meta(previous_meta, page_methods):
+        """Build bounded, one-off browser retry metadata.
+
+        A failed plain response says something about that URL, not every URL
+        on its host. ``dont_retry`` also prevents Scrapy's generic retry
+        middleware from turning one slow browser navigation into several
+        consecutive navigation timeouts.
+        """
+        return {
+            **{key: value for key, value in previous_meta.items() if key != "download_latency"},
+            "playwright": True,
+            "playwright_page_goto_kwargs": {"wait_until": "domcontentloaded"},
+            "playwright_page_methods": page_methods,
+            "dont_retry": True,
+            "start_time": time.time(),
+        }
 
     def _auth_request_meta(self, domain):
         """Extra request meta needed to carry an authenticated session for this
@@ -438,8 +457,6 @@ class WebsiteSpider(scrapy.Spider):
             self.logger.warning("Dropped: non-HTML content (%s): %s", content_type or "unknown", response.url)
             return
 
-        domain = urlparse(response.url).netloc
-
         # bot-challenge/block page (Cloudflare, hCaptcha, reCAPTCHA, ...) -
         # check before anything else, so it never gets mistaken for real
         # content just because trafilatura managed to extract *some* text
@@ -456,11 +473,8 @@ class WebsiteSpider(scrapy.Spider):
                     callback=self.parse,
                     dont_filter=True,
                     meta={
-                        **response.meta,
-                        "playwright": True,
-                        "playwright_page_methods": PLAYWRIGHT_CHALLENGE_WAIT,
+                        **self._playwright_retry_meta(response.meta, PLAYWRIGHT_CHALLENGE_WAIT),
                         "challenge_retry": True,
-                        "start_time": time.time(),
                     },
                 )
                 return
@@ -470,9 +484,9 @@ class WebsiteSpider(scrapy.Spider):
             self._log_blocked(response.url, challenge_reason, depth, source)
             return
 
-        # plain HTTP fetch produced no real content and we haven't already
-        # tried playwright on this URL -> escalate, and remember that this
-        # whole domain needs playwright so future pages skip the plain try
+        # Plain HTTP fetch produced no real content and we have not already
+        # tried Playwright on this URL -> escalate this URL only. A sparse
+        # page must not make every later URL on the same host use a browser.
         # favor_recall: trafilatura's default (precision-favoring) extraction
         # drops card/grid-style content - e.g. a team/staff directory entry -
         # as boilerplate even though it's real content, which is exactly the
@@ -492,17 +506,11 @@ class WebsiteSpider(scrapy.Spider):
         else:
             extracted = trafilatura.extract(response.text, favor_recall=True) or ""
         if video_details is None and not response.meta.get("playwright") and len(extracted) < MIN_EXTRACTED_CHARS:
-            self.js_domains.add(domain)
             yield scrapy.Request(
                 response.url,
                 callback=self.parse,
                 dont_filter=True,
-                meta={
-                    **response.meta,
-                    "playwright": True,
-                    "playwright_page_methods": PLAYWRIGHT_WAIT,
-                    "start_time": time.time(),
-                },
+                meta=self._playwright_retry_meta(response.meta, PLAYWRIGHT_WAIT),
             )
             return
 
@@ -557,24 +565,8 @@ class WebsiteSpider(scrapy.Spider):
             auth_meta = self._auth_request_meta(link_domain)
             if auth_meta:
                 # authenticated domain - always ride the same logged-in
-                # playwright context, regardless of js_domains state
+                # Playwright context for the authenticated session
                 yield scrapy.Request(link.url, callback=self.parse, priority=priority, meta={**child_meta, **auth_meta})
-            elif link_domain in self.js_domains and not is_youtube_video_url(link.url):
-                # a YouTube watch link always gets a plain-fetch attempt first
-                # (see the extract_video_details call above) even if some
-                # other page on this domain already forced js_domains - the
-                # plain HTML is what reliably has the video's metadata JSON,
-                # Playwright's rendered DOM is not
-                yield scrapy.Request(
-                    link.url,
-                    callback=self.parse,
-                    priority=priority,
-                    meta={
-                        **child_meta,
-                        "playwright": True,
-                        "playwright_page_methods": PLAYWRIGHT_WAIT,
-                    },
-                )
             else:
                 yield scrapy.Request(
                     link.url,

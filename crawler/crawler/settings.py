@@ -55,9 +55,12 @@ LOG_FORMATTER = "crawler.logformatter.CrawlerLogFormatter"
 # is a generic, current desktop Chrome UA instead - not impersonating any
 # specific verified bot (that would fail a reverse-DNS check and is a
 # different, more deceptive thing), just not gratuitously announcing "I am a
-# scraper" the way a real browser wouldn't either. Only affects the plain
-# (non-Playwright) fetch - once escalated to Playwright, the real launched
-# Chromium browser already reports its own genuine UA regardless of this.
+# scraper" the way a real browser wouldn't either. Kept for Playwright's own
+# requests and as documentation of which Chrome build/OS this crawl presents
+# as; the plain (non-Playwright) fetch path now goes through curl_cffi (see
+# crawler.stealth_http, IMPERSONATE) instead of Scrapy's own HTTP client, and
+# gets this same Chrome/124/Windows identity from there - a spoofed UA header
+# alone (with no matching TLS handshake) is what curl_cffi actually fixes.
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
 # Obey robots.txt rules
@@ -70,12 +73,20 @@ ROBOTSTXT_OBEY = True
 HTTPERROR_ALLOWED_CODES = [403, 429, 503]
 
 # Concurrency and throttling settings
-#CONCURRENT_REQUESTS = 16
+# Keep ordinary HTTP work parallel across domains, while the per-domain cap
+# prevents either Scrapy or Playwright from hammering one host.
+CONCURRENT_REQUESTS = 8
 CONCURRENT_REQUESTS_PER_DOMAIN = 1
 DOWNLOAD_DELAY = 1
 
-# Disable cookies (enabled by default)
-#COOKIES_ENABLED = False
+# Disabled: the plain (non-Playwright) fetch path now runs through
+# curl_cffi (see crawler.stealth_http), which keeps one real cookie jar per
+# domain inside its own Session objects for session continuity. Scrapy's
+# CookiesMiddleware knows nothing about that jar, so leaving it enabled would
+# only add a second, stale, in-memory-per-run Cookie header on top of - or
+# instead of - the one curl_cffi is actually maintaining. Playwright requests
+# are unaffected: browser contexts already manage their own cookies.
+COOKIES_ENABLED = False
 
 # Disable Telnet Console (enabled by default)
 #TELNETCONSOLE_ENABLED = False
@@ -154,8 +165,14 @@ FEED_EXPORT_ENCODING = "utf-8"
 # misconfigured seed/domain can't run away indefinitely.
 CLOSESPIDER_PAGECOUNT = 500
 
-# Playright default timeout 
-PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT = 60000
+# Browser navigations should fail promptly; a page that cannot reach DOM-ready
+# in 30 seconds is logged and skipped instead of serially stalling its domain.
+PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT = 30000
+PLAYWRIGHT_DEFAULT_TIMEOUT = 10000
+# Explicit resource bounds for browser-backed requests. This matters when
+# several domains independently need a JavaScript retry.
+PLAYWRIGHT_MAX_PAGES_PER_CONTEXT = 2
+PLAYWRIGHT_MAX_CONTEXTS = 4
 
 # Redis-backed frontier: the pending-request queue and the seen-request
 # dupefilter both live in Redis (same instance the ContentDedupPipeline
@@ -167,9 +184,14 @@ SCHEDULER = "scrapy_redis.scheduler.Scheduler"
 DUPEFILTER_CLASS = "scrapy_redis.dupefilter.RFPDupeFilter"
 SCHEDULER_PERSIST = True
 
+# StealthDownloadHandler still defers to Playwright for any request with
+# meta["playwright"] = True (the escalation path in spiders/crawler.py); it
+# only replaces what Playwright's own handler would otherwise fall back to
+# for everything else - Twisted's plain HTTP/1.1 client - with a curl_cffi
+# fetch impersonating Chrome's real TLS fingerprint (crawler.stealth_http).
 DOWNLOAD_HANDLERS = {
-    "http": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
-    "https": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
+    "http": "crawler.curl_cffi_handler.StealthDownloadHandler",
+    "https": "crawler.curl_cffi_handler.StealthDownloadHandler",
 }
 
 TWISTED_REACTOR = "twisted.internet.asyncioreactor.AsyncioSelectorReactor"
