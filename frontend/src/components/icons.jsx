@@ -159,6 +159,27 @@ export function IconTable({ className }) {
   );
 }
 
+export function IconSettings({ className }) {
+  return (
+    <svg className={className} {...base}>
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 13a7.4 7.4 0 000-2l2-1.5-2-3.5-2.3.9a7.5 7.5 0 00-1.7-1l-.4-2.4h-4l-.4 2.4a7.5 7.5 0 00-1.7 1l-2.3-.9-2 3.5L6.6 11a7.4 7.4 0 000 2l-2 1.5 2 3.5 2.3-.9a7.5 7.5 0 001.7 1l.4 2.4h4l.4-2.4a7.5 7.5 0 001.7-1l2.3.9 2-3.5-2-1.5z" />
+    </svg>
+  );
+}
+
+export function IconFileText({ className }) {
+  return (
+    <svg className={className} {...base}>
+      <path d="M7 3.5h7l4 4V19a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 016 19V5a1.5 1.5 0 011-1.5z" />
+      <path d="M14 3.5V8h4.5" />
+      <path d="M9 12.5h6" />
+      <path d="M9 15.5h6" />
+      <path d="M9 9.5h2" />
+    </svg>
+  );
+}
+
 export function IconVideo({ className }) {
   return (
     <svg className={className} {...base}>

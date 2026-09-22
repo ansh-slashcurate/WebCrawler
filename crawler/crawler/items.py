@@ -27,3 +27,4 @@ class PageItems(scrapy.Item):
     matched_terms = scrapy.Field()
     youtube_video = scrapy.Field()
     comments = scrapy.Field()
+    tender_records = scrapy.Field()

@@ -6,6 +6,7 @@ from scrapy.utils.sitemap import Sitemap, sitemap_urls_from_robots
 from crawler.items import PageItems
 from crawler.pipelines import format_duration, utc_timestamp, slugify
 from crawler.entity import EntityQuery
+from crawler.tender import tender_page_score
 from crawler.challenge import detect_challenge
 from crawler.auth import load_auth_config, AuthError
 from crawler.ytpipeline import (
@@ -48,8 +49,27 @@ PLAYWRIGHT_CHALLENGE_WAIT = ()
 MIN_EXTRACTED_CHARS = 200
 # non-HTML file types we never want to fetch/extract - only HTML pages are
 # handled. Used both for on-page link following (LinkExtractor) and for
-# sitemap-discovered URLs (which bypass LinkExtractor entirely)
-DENY_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx")
+# sitemap-discovered URLs (which bypass LinkExtractor entirely). Executables/
+# installers/archives are the same "not HTML, fetch is wasted work" case as
+# documents/images below, just easy to miss until one actually shows up - a
+# real crawl hit a bank's UploadFile/.../nvda_2015.1.exe (a screen-reader
+# installer linked from an accessibility page) and spent 5m50s downloading
+# the whole binary before dropping it for having a non-HTML Content-Type.
+DENY_EXTENSIONS = (
+    ".jpg", ".jpeg", ".png", ".gif", ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".msi", ".dmg", ".apk", ".zip", ".rar", ".7z", ".tar", ".gz",
+)
+# .exe is deliberately NOT in DENY_EXTENSIONS: unlike the types above, it
+# isn't a reliable "definitely not HTML" signal - some sites (older ASP/
+# ISAPI-style routing, common on legacy news/government/PSU portals) serve
+# real HTML pages through a URL that literally ends in .exe, the extension
+# being a request-handler artifact rather than a file type. Guessing from
+# the URL alone would wrongly skip those pages. Instead these get a cheap
+# HEAD preflight (_request_for_url below) that reads the real Content-Type
+# before deciding to fetch the full page or skip it - catching a true binary
+# (e.g. an installer .exe) without the multi-minute full-body download that
+# blindly following it used to cost, while still crawling a genuine .exe-
+# suffixed HTML page normally.
+VERIFY_CONTENT_TYPE_EXTENSIONS = (".exe",)
 
 class WebsiteSpider(scrapy.Spider):
 
@@ -98,11 +118,16 @@ class WebsiteSpider(scrapy.Spider):
 
     def __init__(self, seeds ="seed.txt",max_depth = 2, use_sitemap=True,
                  entity=None, aliases="", context="", max_irrelevant_streak=2,
-                 auth_config="auth.json",
+                 auth_config="auth.json", tender_mode=False,
                  *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.max_depth = int(max_depth)
         self.use_sitemap = str(use_sitemap).lower() not in ("false", "0", "no")
+        # bank tender/RFP mode (see crawler.tender + crawler.pipelines'
+        # TenderExtractionPipeline) - structural extraction only, no LLM
+        # here. Frontier pruning against the bank-name entity below is
+        # skipped in this mode; see the link-following loop.
+        self.tender_mode = str(tender_mode).lower() not in ("false", "0", "no")
 
         # per-domain auth (see crawler/auth.py) - entirely optional, a crawl
         # with no auth.json (or none present for a given domain) behaves
@@ -148,7 +173,16 @@ class WebsiteSpider(scrapy.Spider):
             allow_domains=self.allowed_domains,
             unique=True,
             canonicalize=True,
-            deny_extensions=DENY_EXTENSIONS,
+            # LinkExtractor prepends its own "." to every entry internally
+            # (scrapy.linkextractors.lxmlhtml: `{"." + e for e in ...}`), so
+            # passing DENY_EXTENSIONS' dotted forms straight through (".pdf")
+            # becomes "..pdf" and matches nothing - every PDF/image/Office-doc/
+            # archive link was silently still being followed and fully
+            # downloaded before parse()'s Content-Type check discarded it,
+            # the same waste a real crawl hit for a 6-minute .exe download.
+            # DENY_EXTENSIONS itself keeps its dots (used as-is against full
+            # URL suffixes for the sitemap check below), stripped only here.
+            deny_extensions=[e.lstrip(".") for e in DENY_EXTENSIONS],
         )
 
         self.crawl_start_time = time.time()
@@ -171,6 +205,64 @@ class WebsiteSpider(scrapy.Spider):
 
         self.logger.warning("Blocked/challenge page skipped: %s (%s)", url, reason)
         self.crawler.stats.inc_value("blocked/pages")
+
+    def _request_for_url(self, url, meta, priority=0):
+        """Build the Request for a discovered URL (on-page link or sitemap
+        entry) - an ordinary GET straight to parse() for most URLs, or (for
+        VERIFY_CONTENT_TYPE_EXTENSIONS) a HEAD preflight first, so the real
+        Content-Type decides whether to fetch it as a page or skip it,
+        instead of guessing from the URL the way DENY_EXTENSIONS does for
+        unambiguous binary types."""
+        if url.lower().endswith(VERIFY_CONTENT_TYPE_EXTENSIONS):
+            return scrapy.Request(
+                url,
+                method="HEAD",
+                callback=self._handle_head_check,
+                errback=self._head_check_failed,
+                priority=priority,
+                meta={**meta, "checked_url": url, "resolved_priority": priority},
+            )
+        return scrapy.Request(url, callback=self.parse, priority=priority, meta=meta)
+
+    def _handle_head_check(self, response):
+        """Callback for the HEAD preflight built by _request_for_url. Only
+        ever skips a URL on a clean 2xx HEAD response whose Content-Type is
+        confidently non-HTML - any other outcome falls back to a normal GET.
+        Verified against a real site (PNB Bank) that returns 404 for HEAD on
+        a URL that returns 200 for GET: trusting a non-2xx HEAD status as
+        "not HTML" would wrongly skip a page that's actually there."""
+        meta = dict(response.meta)
+        url = meta.pop("checked_url")
+        priority = meta.pop("resolved_priority", 0)
+
+        if 200 <= response.status < 300:
+            content_type = response.headers.get("Content-Type", b"").decode(errors="ignore")
+            if "text/html" in content_type:
+                meta["start_time"] = time.time()
+                yield scrapy.Request(url, callback=self.parse, priority=priority, meta=meta)
+                return
+            self._log_blocked(
+                url, f"non-html-via-head-check ({content_type or 'unknown'})",
+                meta.get("depth", 0), meta.get("source", "link"),
+            )
+            return
+
+        self.logger.debug(
+            "HEAD check for %s returned status %d - falling back to GET", url, response.status,
+        )
+        meta["start_time"] = time.time()
+        yield scrapy.Request(url, callback=self.parse, priority=priority, meta=meta)
+
+    def _head_check_failed(self, failure):
+        """The HEAD preflight itself failed (network error, server doesn't
+        support HEAD, timeout, ...) - fall back to a normal GET rather than
+        risk silently losing a real page over an unverifiable server quirk."""
+        meta = dict(failure.request.meta)
+        url = meta.pop("checked_url", failure.request.url)
+        priority = meta.pop("resolved_priority", 0)
+        self.logger.debug("HEAD check failed for %s (%s) - falling back to GET", url, failure.value)
+        meta["start_time"] = time.time()
+        yield scrapy.Request(url, callback=self.parse, priority=priority, meta=meta)
 
     @staticmethod
     def _playwright_retry_meta(previous_meta, page_methods):
@@ -430,7 +522,7 @@ class WebsiteSpider(scrapy.Spider):
                 found += 1
                 meta = {"depth": 0, "start_time": time.time(), "source": "sitemap"}
                 meta.update(self._auth_request_meta(loc_domain))
-                yield scrapy.Request(loc, callback=self.parse, meta=meta)
+                yield self._request_for_url(loc, meta)
             self.logger.info("Sitemap %s contributed %d URL(s), skipped %d non-HTML", response.url, found, skipped)
 
     # Parsing response
@@ -528,9 +620,13 @@ class WebsiteSpider(scrapy.Spider):
         # entity-focused pruning: once a branch has gone max_irrelevant_streak
         # pages in a row without mentioning the entity, stop following it even
         # though depth < max_depth - this is what keeps the crawl from walking
-        # the whole site instead of just the entity-relevant parts of it
+        # the whole site instead of just the entity-relevant parts of it.
+        # Skipped entirely in tender_mode: a bank's tenders subsection won't
+        # keep repeating the bank's own name on every page, so this
+        # heuristic doesn't apply there - tender crawls are bounded by
+        # max_depth/CLOSESPIDER_PAGECOUNT only, same as a non-entity crawl.
         irrelevant_streak = response.meta.get("irrelevant_streak", 0)
-        if self.entity_query:
+        if self.entity_query and not self.tender_mode:
             _, page_relevant, _ = self.entity_query.score(extracted or "")
             irrelevant_streak = 0 if page_relevant else irrelevant_streak + 1
             if irrelevant_streak >= self.max_irrelevant_streak:
@@ -556,21 +652,22 @@ class WebsiteSpider(scrapy.Spider):
 
             child_meta = {"depth": depth + 1, "start_time": time.time(), "source": "link"}
             priority = 0
-            if self.entity_query:
+            if self.entity_query and not self.tender_mode:
                 child_meta["irrelevant_streak"] = irrelevant_streak
                 # anchor text is a cheap, pre-fetch signal - links whose text
                 # already mentions the entity get crawled before filler pages
                 priority, _, _ = self.entity_query.score(link.text or "")
+            if self.tender_mode:
+                # prioritize links toward the tenders/procurement section
+                # over the rest of the bank's site (anchor text + URL, since
+                # a nav item's href often carries the keyword the visible
+                # text doesn't, e.g. "/procurement/tenders")
+                priority += tender_page_score((link.text or "") + " " + link.url)
 
             auth_meta = self._auth_request_meta(link_domain)
             if auth_meta:
                 # authenticated domain - always ride the same logged-in
                 # Playwright context for the authenticated session
-                yield scrapy.Request(link.url, callback=self.parse, priority=priority, meta={**child_meta, **auth_meta})
+                yield self._request_for_url(link.url, {**child_meta, **auth_meta}, priority=priority)
             else:
-                yield scrapy.Request(
-                    link.url,
-                    callback=self.parse,
-                    priority=priority,
-                    meta=child_meta,
-                )
+                yield self._request_for_url(link.url, child_meta, priority=priority)

@@ -1,14 +1,20 @@
 import { useEffect, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
 import RunDetail from "./RunDetail";
 import { Card, Button, Badge, EmptyState } from "./ui";
 import { IconArrowLeft, IconRefresh, IconLayers, IconAlertTriangle } from "./icons";
 
-export default function RunsBrowser({ openTarget, onOpenHandled }) {
+// Three routes (/runs, /runs/:entity, /runs/:entity/:runId) all render this
+// same component - which of the three views below shows is driven entirely
+// by which URL params are present, so each level is its own shareable/
+// bookmarkable/back-button-able page instead of in-memory tab state.
+export default function RunsBrowser() {
+  const { entity, runId } = useParams();
+  const navigate = useNavigate();
+
   const [entities, setEntities] = useState(null);
-  const [selectedEntity, setSelectedEntity] = useState(null);
   const [runs, setRuns] = useState(null);
-  const [selectedRun, setSelectedRun] = useState(null);
   const [error, setError] = useState(null);
 
   const loadEntities = () => {
@@ -17,46 +23,41 @@ export default function RunsBrowser({ openTarget, onOpenHandled }) {
 
   useEffect(loadEntities, []);
 
-  // deep-link from a just-finished live job
   useEffect(() => {
-    if (openTarget) {
-      setSelectedEntity(openTarget.entity);
-      setSelectedRun(openTarget.runId);
-      onOpenHandled();
+    if (entity && !runId) {
+      api.runs(entity).then(setRuns).catch((e) => setError(e.message));
     }
-  }, [openTarget, onOpenHandled]);
-
-  useEffect(() => {
-    if (selectedEntity && !selectedRun) {
-      api.runs(selectedEntity).then(setRuns).catch((e) => setError(e.message));
-    }
-  }, [selectedEntity, selectedRun]);
+  }, [entity, runId]);
 
   if (error) return <p className="text-sm text-red-600 dark:text-red-400">{error}</p>;
 
-  if (selectedEntity && selectedRun) {
+  if (entity && runId) {
     return (
       <RunDetail
-        entity={selectedEntity}
-        runId={selectedRun}
-        onBack={() => setSelectedRun(null)}
+        entity={entity}
+        runId={runId}
+        onBack={() => navigate(`/runs/${encodeURIComponent(entity)}`)}
       />
     );
   }
 
-  if (selectedEntity) {
+  if (entity) {
     return (
       <div>
-        <Button variant="ghost" size="sm" onClick={() => setSelectedEntity(null)} className="mb-4">
+        <Button variant="ghost" size="sm" onClick={() => navigate("/runs")} className="mb-4">
           <IconArrowLeft className="h-3.5 w-3.5" />
           All entities
         </Button>
-        <h2 className="mb-4 font-mono text-lg font-semibold text-slate-900 dark:text-slate-100">{selectedEntity}</h2>
+        <h2 className="mb-4 font-mono text-lg font-semibold text-slate-900 dark:text-slate-100">{entity}</h2>
         {runs === null && <p className="text-sm text-slate-500 dark:text-slate-400">Loading…</p>}
         {runs?.length === 0 && <EmptyState icon={IconLayers} title="No runs yet" />}
         <div className="space-y-2">
           {runs?.map((r) => (
-            <button key={r.run_id} onClick={() => setSelectedRun(r.run_id)} className="block w-full text-left">
+            <button
+              key={r.run_id}
+              onClick={() => navigate(`/runs/${encodeURIComponent(entity)}/${encodeURIComponent(r.run_id)}`)}
+              className="block w-full text-left"
+            >
               <Card className="p-4 transition-colors hover:border-blue-300 dark:hover:border-blue-700">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="font-mono text-sm text-slate-800 dark:text-slate-200">{r.run_id}</span>
@@ -95,7 +96,7 @@ export default function RunsBrowser({ openTarget, onOpenHandled }) {
       )}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {entities?.map((e) => (
-          <button key={e.slug} onClick={() => setSelectedEntity(e.slug)} className="text-left">
+          <button key={e.slug} onClick={() => navigate(`/runs/${encodeURIComponent(e.slug)}`)} className="text-left">
             <Card className="p-4 transition-colors hover:border-blue-300 dark:hover:border-blue-700">
               <div className="font-mono text-sm font-medium text-slate-800 dark:text-slate-200">
                 {e.slug === "default" ? "(no entity)" : e.slug}

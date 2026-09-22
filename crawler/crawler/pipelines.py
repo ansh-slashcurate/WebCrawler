@@ -21,6 +21,7 @@ from lxml import etree, html as lxml_html
 import trafilatura
 
 from crawler.ytpipeline import render_video_text
+from crawler.tender import extract_tender_records
 
 
 BROKEN_TAG_NAMES = "li|ul|ol|div|span|p|br|strong|em|table|tr|td|a|h[1-6]"
@@ -220,12 +221,39 @@ class NormalizationPipeline:
         return item
 
 
+# tender/RFP extraction pipeline - only active in tender_mode (see
+# crawler.spiders.crawler.WebsiteSpider + crawler.tender). Structural
+# extraction only, unfiltered: every record found is attached with
+# classification="pending" - a later, separate step (webapi.py's /classify
+# endpoint + crawler.watsonx_client) decides relevance against a user's own
+# tags. Never raises DropItem - a page with zero tender records found on it
+# may still be a perfectly ordinary page worth keeping.
+class TenderExtractionPipeline:
+    def process_item(self, item, spider):
+        if not getattr(spider, "tender_mode", False):
+            return item
+
+        adapter = ItemAdapter(item)
+        records = extract_tender_records(adapter.get("html", ""), adapter.get("url"))
+        if records:
+            adapter["tender_records"] = records
+        return item
+
+
 # entity relevance pipeline - only active when the spider was started with
 # an entity query (spider.entity_query); re-checks against cleaned_content
 # (post-trafilatura, so no markup noise) rather than trusting the spider's
 # own raw-text scoring, and is the actual gate on what reaches storage
 class EntityRelevancePipeline:
     def process_item(self, item, spider):
+        # tender_mode's relevance gate is the tag-classification step
+        # instead of bank-name mentions - a pure tenders-listing table often
+        # never repeats the bank's own name, so this pipeline's usual check
+        # would silently drop pages whose tender_records TenderExtractionPipeline
+        # (priority 160, runs just before this one) already extracted
+        if getattr(spider, "tender_mode", False):
+            return item
+
         entity_query = getattr(spider, "entity_query", None)
         if not entity_query:
             return item
@@ -263,6 +291,7 @@ class StoragePipeline:
         self.out_file = None
         self.pages_written = 0
         self.clean_written = 0
+        self.tenders_written = 0
 
     @classmethod
     def from_crawler(cls, crawler):
@@ -291,18 +320,25 @@ class StoragePipeline:
         self.clean_lines_before = _count_lines(clean_path)
         self.clean_file = open(clean_path, "a", encoding="utf-8")
 
+        tenders_path = os.path.join(self.output_dir, "tenders.jsonl")
+        self.tenders_lines_before = _count_lines(tenders_path)
+        self.tenders_file = open(tenders_path, "a", encoding="utf-8")
+
 
     def close_spider(self, spider):
         if self.out_file:
             self.out_file.close()
         if self.clean_file:
             self.clean_file.close()
+        if self.tenders_file:
+            self.tenders_file.close()
 
         self._write_summary(spider)
 
     def _write_summary(self, spider):
         out_path = os.path.join(self.output_dir, "pages.jsonl")
         clean_path = os.path.join(self.output_dir, "clean.jsonl")
+        tenders_path = os.path.join(self.output_dir, "tenders.jsonl")
 
         # reconciliation: re-count each file from disk after closing (i.e.
         # flushing) it, and compare against what we intended to write this
@@ -310,6 +346,7 @@ class StoragePipeline:
         # error, ...) that "we logged it" alone wouldn't reveal
         pages_actual = _count_lines(out_path) - self.pages_lines_before
         clean_actual = _count_lines(clean_path) - self.clean_lines_before
+        tenders_actual = _count_lines(tenders_path) - self.tenders_lines_before
         reconciliation = {
             "pages_jsonl": {
                 "expected": self.pages_written,
@@ -320,6 +357,11 @@ class StoragePipeline:
                 "expected": self.clean_written,
                 "actual": clean_actual,
                 "ok": clean_actual == self.clean_written,
+            },
+            "tenders_jsonl": {
+                "expected": self.tenders_written,
+                "actual": tenders_actual,
+                "ok": tenders_actual == self.tenders_written,
             },
         }
         for name, result in reconciliation.items():
@@ -344,6 +386,7 @@ class StoragePipeline:
                 "html": stats.get("stored/html", 0),
                 "pdf": stats.get("stored/pdf", 0),
             },
+            "tenders": self.tenders_written,
             "dropped": {
                 "duplicate": stats.get("dropped/duplicate", 0),
                 "empty": stats.get("dropped/empty", 0),
@@ -401,6 +444,11 @@ class StoragePipeline:
             clean_record["video"] = adapter.get("youtube_video")
         self.clean_file.write(json.dumps(clean_record, ensure_ascii=False) + "\n")
         self.clean_written += 1
+
+        for tender_record in adapter.get("tender_records") or []:
+            self.tenders_file.write(json.dumps(tender_record, ensure_ascii=False) + "\n")
+            self.tenders_written += 1
+        spider.crawler.stats.inc_value("stored/tenders", count=len(adapter.get("tender_records") or []))
 
         if adapter.get("comments"):
             spider.crawler.stats.inc_value("youtube/videos_with_comments")

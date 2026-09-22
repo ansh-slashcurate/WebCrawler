@@ -121,6 +121,7 @@ ITEM_PIPELINES = {
     "crawler.pipelines.ContentDedupPipeline": 100,
     "crawler.ytpipeline.YoutubePipeline": 120,
     "crawler.pipelines.NormalizationPipeline": 150,
+    "crawler.pipelines.TenderExtractionPipeline": 160,
     "crawler.pipelines.EntityRelevancePipeline": 175,
     "crawler.pipelines.StoragePipeline": 200,
 }

@@ -10,12 +10,21 @@ Endpoints:
     GET    /api/auth-domains                            - configured login/API-key domains
     POST   /api/auth-domains                            - add/update one domain's auth (form_login or api_token)
     DELETE /api/auth-domains/{domain}                   - remove one domain's auth
+    GET    /api/bank-sites                              - saved bank sites (Tenders page)
+    POST   /api/bank-sites                              - add a saved bank site
+    DELETE /api/bank-sites/{id}                         - remove a saved bank site
+    GET    /api/tender-tags                             - saved tender tags (Tenders page)
+    POST   /api/tender-tags                             - add a tender tag
+    DELETE /api/tender-tags/{id}                        - remove a tender tag
     GET  /api/entities                                 - entity slugs with output on disk
     GET  /api/runs?entity=<slug|default>                - run list for one entity/scope
     GET  /api/runs/{entity}/{run_id}                    - one run's summary + counts
     GET  /api/runs/{entity}/{run_id}/pages?offset&limit&q - paginated clean.jsonl
     GET  /api/runs/{entity}/{run_id}/blocked            - blocked.jsonl entries
-    POST /api/crawls                                    - launch `scrapy crawl rag_crawler`
+    GET  /api/runs/{entity}/{run_id}/tenders?offset&limit&q&classification&tag - paginated tenders.jsonl
+    POST /api/runs/{entity}/{run_id}/tenders/classify   - watsonx-classify pending tenders against tags (background job)
+    GET  /api/tender-classify/{token}                   - one classify job's status/progress
+    POST /api/crawls                                    - launch `scrapy crawl rag_crawler` (add tender_mode=true for a Tenders crawl)
     GET  /api/crawls                                    - jobs launched this API session
     GET  /api/crawls/{token}                            - one job's live status + log tail
 
@@ -28,15 +37,18 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
 
 import redis
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from sqlalchemy import text as sa_text
+from sqlalchemy.orm import Session
 
 # a `scrapy crawl` launched below (subprocess.Popen) inherits this process's
 # environment, so .env needs loading here too, not just in crawler/settings.py -
@@ -47,7 +59,10 @@ from pydantic import BaseModel
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 from crawler import settings as scrapy_settings
+from crawler import watsonx_client
 from crawler.auth import load_auth_config, AuthProfile, AuthError
+from crawler.db import SessionLocal, get_db
+from crawler.models import BankSite, TenderTag, User, UserRole
 from crawler.pipelines import slugify
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -55,6 +70,30 @@ OUTPUT_DIR = BASE_DIR / "output"
 RUNS_DIR = BASE_DIR / "runs"  # per-launch seed files + captured stdout, not crawl output
 AUTH_JSON_PATH = BASE_DIR / "auth.json"
 RUN_ID_RE = re.compile(r"^\d{8}_\d{6}_\d+$")
+
+# Every write from the Tenders/Settings pages is attributed to this one
+# account - see crawler/models.py's User/role columns and db_seed.py. There's
+# no login yet (per "for now we are keeping everything in admin panel"), so
+# this is the single implicit actor rather than a per-request identity.
+DEFAULT_ADMIN_EMAIL = "pachauria534@gmail.com"
+
+
+def _redacted_database_url():
+    """host/dbname only, for /api/health - never the password (same
+    never-expose-the-secret convention as youtube_api/auth below)."""
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        return None
+    return re.sub(r"//[^@]+@", "//***@", url).split("?")[0]
+
+
+def _get_or_create_admin(db):
+    admin = db.query(User).filter_by(email=DEFAULT_ADMIN_EMAIL).one_or_none()
+    if admin is None:
+        admin = User(email=DEFAULT_ADMIN_EMAIL, role=UserRole.admin, name="Admin")
+        db.add(admin)
+        db.flush()
+    return admin
 
 app = FastAPI(title="rag_crawler control panel API")
 app.add_middleware(
@@ -83,6 +122,13 @@ def health():
         result["redis"] = {"ok": True, "url": scrapy_settings.REDIS_URL}
     except Exception as e:
         result["redis"] = {"ok": False, "url": scrapy_settings.REDIS_URL, "error": str(e)}
+
+    try:
+        with SessionLocal() as db:
+            db.execute(sa_text("select 1"))
+        result["database"] = {"ok": True, "target": _redacted_database_url()}
+    except Exception as e:
+        result["database"] = {"ok": False, "target": _redacted_database_url(), "error": str(e)}
 
     try:
         from playwright.sync_api import sync_playwright
@@ -227,6 +273,94 @@ def delete_auth_domain(domain: str):
     return {"ok": True}
 
 
+# ---------- Tenders: saved bank sites + tags (dedicated Tenders page) ----------
+#
+# Postgres-backed (crawler/models.py's BankSite/TenderTag) - previously flat
+# JSON files (bank_sites.json/tender_tags.json), migrated over by db_seed.py.
+
+def _bank_site_dict(site):
+    return {"id": site.id, "name": site.name, "url": site.url}
+
+
+def _tender_tag_dict(tag):
+    return {"id": tag.id, "name": tag.name, "description": tag.description or "", "enabled": tag.enabled}
+
+
+class BankSiteRequest(BaseModel):
+    name: str
+    url: str
+
+
+@app.get("/api/bank-sites")
+def list_bank_sites(db: Session = Depends(get_db)):
+    sites = db.query(BankSite).order_by(BankSite.created_at).all()
+    return [_bank_site_dict(s) for s in sites]
+
+
+@app.post("/api/bank-sites")
+def add_bank_site(req: BankSiteRequest, db: Session = Depends(get_db)):
+    name = req.name.strip()
+    url = req.url.strip()
+    if not name or not url:
+        raise HTTPException(400, "name and url are required")
+    admin = _get_or_create_admin(db)
+    site = BankSite(name=name, url=url, created_by_id=admin.id)
+    db.add(site)
+    db.commit()
+    db.refresh(site)
+    return _bank_site_dict(site)
+
+
+@app.delete("/api/bank-sites/{site_id}")
+def delete_bank_site(site_id: int, db: Session = Depends(get_db)):
+    db.query(BankSite).filter(BankSite.id == site_id).delete()
+    db.commit()
+    return {"ok": True}
+
+
+class TenderTagRequest(BaseModel):
+    name: str
+    description: str = ""
+    enabled: bool = True
+
+
+def _load_tender_tags_raw():
+    """Used outside request scope too (the classify background thread - see
+    _run_classify_job below), so it opens its own short-lived session rather
+    than relying on FastAPI's per-request get_db dependency."""
+    db = SessionLocal()
+    try:
+        tags = db.query(TenderTag).order_by(TenderTag.created_at).all()
+        return [_tender_tag_dict(t) for t in tags]
+    finally:
+        db.close()
+
+
+@app.get("/api/tender-tags")
+def list_tender_tags():
+    return _load_tender_tags_raw()
+
+
+@app.post("/api/tender-tags")
+def add_tender_tag(req: TenderTagRequest, db: Session = Depends(get_db)):
+    name = req.name.strip()
+    if not name:
+        raise HTTPException(400, "name is required")
+    admin = _get_or_create_admin(db)
+    tag = TenderTag(name=name, description=req.description.strip(), enabled=req.enabled, created_by_id=admin.id)
+    db.add(tag)
+    db.commit()
+    db.refresh(tag)
+    return _tender_tag_dict(tag)
+
+
+@app.delete("/api/tender-tags/{tag_id}")
+def delete_tender_tag(tag_id: int, db: Session = Depends(get_db)):
+    db.query(TenderTag).filter(TenderTag.id == tag_id).delete()
+    db.commit()
+    return {"ok": True}
+
+
 # ---------- browsing existing runs ----------
 
 def _entity_dirs():
@@ -306,6 +440,7 @@ def run_detail(entity: str, run_id: str):
         "pages_lines": _count_lines(run_dir / "pages.jsonl"),
         "clean_lines": _count_lines(run_dir / "clean.jsonl"),
         "blocked_lines": _count_lines(run_dir / "blocked.jsonl"),
+        "tenders_lines": _count_lines(run_dir / "tenders.jsonl"),
     }
 
 
@@ -349,6 +484,113 @@ def run_blocked(entity: str, run_id: str):
     return items
 
 
+@app.get("/api/runs/{entity}/{run_id}/tenders")
+def run_tenders(entity: str, run_id: str, offset: int = 0, limit: int = 20, q: str = "", classification: str = "", tag: str = ""):
+    run_dir = _entity_base_dir(entity) / run_id
+    tenders_path = run_dir / "tenders.jsonl"
+    if not tenders_path.exists():
+        raise HTTPException(404, "tenders.jsonl not found for this run")
+
+    q_lower = q.lower().strip()
+    matched = []
+    with open(tenders_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            if q_lower:
+                haystack = f"{record.get('title') or ''} {record.get('reference_no') or ''}".lower()
+                if q_lower not in haystack:
+                    continue
+            if classification and record.get("classification") != classification:
+                continue
+            if tag and tag not in (record.get("matched_tags") or []):
+                continue
+            matched.append(record)
+
+    total = len(matched)
+    page = matched[offset:offset + limit]
+    return {"total": total, "offset": offset, "limit": limit, "items": page}
+
+
+# ---------- Tenders: watsonx classification (background job, same idiom as crawls) ----------
+
+CLASSIFY_JOBS = {}  # token -> {status, total, done, matched, error}
+
+
+class ClassifyRequest(BaseModel):
+    tag_ids: list[int] | None = None
+
+
+def _run_classify_job(token, entity, run_id, tag_ids):
+    job = CLASSIFY_JOBS[token]
+    try:
+        run_dir = _entity_base_dir(entity) / run_id
+        tenders_path = run_dir / "tenders.jsonl"
+        if not tenders_path.exists():
+            raise FileNotFoundError(f"tenders.jsonl not found for {entity}/{run_id}")
+
+        records = [
+            json.loads(line) for line in tenders_path.read_text(encoding="utf-8").splitlines() if line.strip()
+        ]
+
+        raw_tags = _load_tender_tags_raw()
+        tags = [t for t in raw_tags if t.get("enabled", True) and (not tag_ids or t["id"] in tag_ids)]
+        if not tags:
+            raise ValueError("No enabled tender tags to classify against - add one on the Tenders page first")
+
+        pending_indices = [i for i, r in enumerate(records) if r.get("classification") == "pending"]
+        job["total"] = len(pending_indices)
+
+        results = watsonx_client.classify_batch([records[i] for i in pending_indices], tags)
+
+        matched = 0
+        for local_id, result in results.items():
+            i = pending_indices[int(local_id)]
+            records[i]["classification"] = result["classification"]
+            records[i]["matched_tags"] = result["matched_tags"]
+            records[i]["reason"] = result["reason"]
+            if result["matched_tags"]:
+                matched += 1
+        job["done"] = len(results)
+
+        # atomic rewrite (temp file + rename) so a mid-write crash can't
+        # leave tenders.jsonl half-written/corrupted
+        tmp_path = tenders_path.with_name(tenders_path.name + ".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            for record in records:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        tmp_path.replace(tenders_path)
+
+        job["matched"] = matched
+        job["status"] = "finished"
+    except Exception as e:
+        job["status"] = "failed"
+        job["error"] = str(e)
+
+
+@app.post("/api/runs/{entity}/{run_id}/tenders/classify")
+def start_classify(entity: str, run_id: str, req: ClassifyRequest):
+    run_dir = _entity_base_dir(entity) / run_id
+    if not (run_dir / "tenders.jsonl").exists():
+        raise HTTPException(404, "tenders.jsonl not found for this run")
+
+    token = uuid.uuid4().hex[:12]
+    CLASSIFY_JOBS[token] = {"status": "running", "total": 0, "done": 0, "matched": 0, "error": None}
+    thread = threading.Thread(target=_run_classify_job, args=(token, entity, run_id, req.tag_ids), daemon=True)
+    thread.start()
+    return {"token": token}
+
+
+@app.get("/api/tender-classify/{token}")
+def classify_status(token: str):
+    job = CLASSIFY_JOBS.get(token)
+    if not job:
+        raise HTTPException(404, "unknown classify job token")
+    return {"token": token, **job}
+
+
 # ---------- launching crawls ----------
 
 class CrawlRequest(BaseModel):
@@ -359,6 +601,7 @@ class CrawlRequest(BaseModel):
     max_depth: int = 2
     use_sitemap: bool = True
     max_irrelevant_streak: int = 2
+    tender_mode: bool = False
 
 
 @app.post("/api/crawls")
@@ -366,6 +609,11 @@ def start_crawl(req: CrawlRequest):
     seeds = [s.strip() for s in req.seeds if s.strip()]
     if not seeds:
         raise HTTPException(400, "at least one seed URL is required")
+    if req.tender_mode and not (req.entity and req.entity.strip()):
+        # tenders are stored per-bank (output/<bank-slug>/<run_id>/tenders.jsonl),
+        # same folder convention as today's entity-scoped output - "entity" here
+        # is the bank name
+        raise HTTPException(400, "entity (bank name) is required when tender_mode is set")
 
     # The spider deliberately uses one persistent Redis frontier. Launching a
     # second local crawl against it causes both processes to consume the same
@@ -389,6 +637,7 @@ def start_crawl(req: CrawlRequest):
         "-a", f"max_depth={req.max_depth}",
         "-a", f"use_sitemap={req.use_sitemap}",
         "-a", f"max_irrelevant_streak={req.max_irrelevant_streak}",
+        "-a", f"tender_mode={req.tender_mode}",
     ]
     if req.entity:
         cmd += ["-a", f"entity={req.entity}"]

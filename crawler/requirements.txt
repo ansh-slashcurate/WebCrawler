@@ -15,3 +15,15 @@ python-dotenv==1.2.2
 # Control panel API (webapi.py)
 fastapi==0.141.1
 uvicorn[standard]==0.52.4
+
+# Postgres (Neon) - control-panel config data: users/bank_sites/tender_tags
+# (crawler/models.py). Migrations: `alembic upgrade head` from crawler/.
+SQLAlchemy==2.0.54
+psycopg2-binary==2.9.13
+alembic==1.20.0
+
+# Tenders/RFP classification (webapi.py's /tenders/classify + crawler/watsonx_client.py) -
+# only imported lazily when that endpoint is actually called
+langchain==0.3.27
+langchain-ibm==0.3.10
+pydantic==2.9.2

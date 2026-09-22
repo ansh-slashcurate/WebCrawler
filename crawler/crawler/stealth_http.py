@@ -51,6 +51,19 @@ PLATFORM_HEADERS = {
 # the real request, so those are forwarded as-is rather than allowlisted.
 UNFORWARDED_HEADERS = {"user-agent", "accept-encoding", "accept", "accept-language"}
 
+# curl_cffi already fully decodes the response body (gzip/br/deflate) before
+# handing it back - by the time stealth_fetch sees curl_response.content,
+# it's genuinely plain bytes. But curl_response.headers still carries the
+# ORIGINAL Content-Encoding/Content-Length describing the compressed wire
+# transfer, not this already-decoded body. Forwarding those as-is into the
+# Scrapy Response fools Scrapy's own HttpCompressionMiddleware (and, for
+# robots.txt, its RobotsTxtMiddleware) into trying to decompress an
+# already-plain body a second time - confirmed against a real
+# Brotli-compressed site (thehindu.com): "brotli: decoder failed", the
+# fetch failing outright with 0 pages ever reaching parse(). Dropped so
+# downstream code sees this response as what it actually is.
+STALE_HEADERS_AFTER_DECODE = {"content-encoding", "content-length"}
+
 _sessions = {}
 _sessions_lock = threading.Lock()
 
@@ -96,6 +109,7 @@ def stealth_fetch(request: Request) -> Response:
     response_headers = {
         name.encode("utf-8"): value.encode("utf-8")
         for name, value in curl_response.headers.items()
+        if name.lower() not in STALE_HEADERS_AFTER_DECODE
     }
     respcls = responsetypes.from_args(
         headers=response_headers, url=curl_response.url, body=curl_response.content
