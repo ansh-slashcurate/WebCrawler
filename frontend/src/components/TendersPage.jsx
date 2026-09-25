@@ -13,16 +13,30 @@ import TenderResultsView from "./tenders/TenderResultsView";
 // one-crawl-at-a-time rule.
 //
 // Tags are deliberately shown above the launch form: add what you're looking
-// for first, then start the crawl (classification itself still runs as a
-// separate step from the results view below, once the crawl has finished).
+// for first, so a crawl's automatic classification (see TenderLaunchForm's
+// pipeline stepper) has something to classify against the moment it finishes.
 export default function TendersPage({ prefillSeed }) {
   const [refreshKey, setRefreshKey] = useState(0);
+  const [focus, setFocus] = useState({ entity: null, runId: null });
+  const [pipelineStatus, setPipelineStatus] = useState(null);
+
+  const handleLaunched = (status) => {
+    setRefreshKey((k) => k + 1);
+    // jump straight to the run that just finished instead of leaving
+    // whatever bank/run was previously selected in the results view below
+    setFocus({ entity: status.entity, runId: status.run_id });
+  };
 
   return (
     <div className="space-y-6">
       <TenderTagsPanel />
-      <TenderLaunchForm prefillSeed={prefillSeed} onLaunched={() => setRefreshKey((k) => k + 1)} />
-      <TenderResultsView refreshKey={refreshKey} />
+      <TenderLaunchForm prefillSeed={prefillSeed} onLaunched={handleLaunched} onPipelineUpdate={setPipelineStatus} />
+      <TenderResultsView
+        refreshKey={refreshKey}
+        focusEntity={focus.entity}
+        focusRunId={focus.runId}
+        pipelineStatus={pipelineStatus}
+      />
     </div>
   );
 }

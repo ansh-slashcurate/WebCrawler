@@ -131,3 +131,7 @@ npm run dev   # opens on http://localhost:5173, talks to the API on :8002
 
 ## frontend/.env.example documents VITE_API_URL if your API runs on a
 ## different port - copy it to frontend/.env and adjust.
+
+
+==================
+# Also fixed for .exe(Essensic Dynamic web pages)

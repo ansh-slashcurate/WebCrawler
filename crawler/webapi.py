@@ -16,17 +16,20 @@ Endpoints:
     GET    /api/tender-tags                             - saved tender tags (Tenders page)
     POST   /api/tender-tags                             - add a tender tag
     DELETE /api/tender-tags/{id}                        - remove a tender tag
+    GET    /api/settings                                - user-editable crawl defaults (Settings page)
+    PUT    /api/settings                                - update crawl defaults (currently: max_pages_per_crawl)
     GET  /api/entities                                 - entity slugs with output on disk
     GET  /api/runs?entity=<slug|default>                - run list for one entity/scope
     GET  /api/runs/{entity}/{run_id}                    - one run's summary + counts
     GET  /api/runs/{entity}/{run_id}/pages?offset&limit&q - paginated clean.jsonl
     GET  /api/runs/{entity}/{run_id}/blocked            - blocked.jsonl entries
-    GET  /api/runs/{entity}/{run_id}/tenders?offset&limit&q&classification&tag - paginated tenders.jsonl
-    POST /api/runs/{entity}/{run_id}/tenders/classify   - watsonx-classify pending tenders against tags (background job)
-    GET  /api/tender-classify/{token}                   - one classify job's status/progress
+    GET  /api/runs/{entity}/{run_id}/tenders?offset&limit&q&classification&tag&filtered - paginated tenders.jsonl (filtered=true default = matched a tag only)
+    GET  /api/runs/{entity}/{run_id}/pipeline-logs?limit - classify/LLM-call event trail for this run (debugging; read from logs/crawl_<date>.log)
+    POST /api/runs/{entity}/{run_id}/tenders/classify   - "Reclassify" - manual backfill classify (auto-fires already on crawl finish, see /api/crawls/{token})
+    GET  /api/tender-classify/{token}                   - one manual classify job's status/progress
     POST /api/crawls                                    - launch `scrapy crawl rag_crawler` (add tender_mode=true for a Tenders crawl)
     GET  /api/crawls                                    - jobs launched this API session
-    GET  /api/crawls/{token}                            - one job's live status + log tail
+    GET  /api/crawls/{token}                            - one job's live status + log tail + tender_pipeline (extract/classify progress, tender_mode only)
 
 "entity" in the URL is a slug (crawler.pipelines.slugify output), or the
 literal string "default" for crawls started without -a entity=.
@@ -59,10 +62,10 @@ from sqlalchemy.orm import Session
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 from crawler import settings as scrapy_settings
-from crawler import watsonx_client
+from crawler import tender_sync
 from crawler.auth import load_auth_config, AuthProfile, AuthError
 from crawler.db import SessionLocal, get_db
-from crawler.models import BankSite, TenderTag, User, UserRole
+from crawler.models import AppSetting, BankSite, TenderTag, User, UserRole
 from crawler.pipelines import slugify
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -361,6 +364,50 @@ def delete_tender_tag(tag_id: int, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
+# ---------- app settings (Settings page: crawl defaults) ----------
+#
+# Postgres-backed key/value (crawler/models.py's AppSetting) - only one key
+# exists today (max_pages_per_crawl, overriding CLOSESPIDER_PAGECOUNT per
+# crawl - see start_crawl below), read with a fallback to that setting's own
+# hardcoded default in crawler/settings.py so behavior is unchanged until a
+# user actually edits it on the Settings page.
+
+MAX_PAGES_SETTING_KEY = "max_pages_per_crawl"
+
+
+def _get_max_pages_per_crawl(db):
+    row = db.query(AppSetting).filter(AppSetting.key == MAX_PAGES_SETTING_KEY).one_or_none()
+    if row is None:
+        return scrapy_settings.CLOSESPIDER_PAGECOUNT
+    try:
+        return int(row.value)
+    except ValueError:
+        return scrapy_settings.CLOSESPIDER_PAGECOUNT
+
+
+class SettingsUpdateRequest(BaseModel):
+    max_pages_per_crawl: int
+
+
+@app.get("/api/settings")
+def get_settings(db: Session = Depends(get_db)):
+    return {"max_pages_per_crawl": _get_max_pages_per_crawl(db)}
+
+
+@app.put("/api/settings")
+def update_settings(req: SettingsUpdateRequest, db: Session = Depends(get_db)):
+    if req.max_pages_per_crawl < 1:
+        raise HTTPException(400, "max_pages_per_crawl must be at least 1")
+
+    row = db.query(AppSetting).filter(AppSetting.key == MAX_PAGES_SETTING_KEY).one_or_none()
+    if row is None:
+        db.add(AppSetting(key=MAX_PAGES_SETTING_KEY, value=str(req.max_pages_per_crawl)))
+    else:
+        row.value = str(req.max_pages_per_crawl)
+    db.commit()
+    return {"max_pages_per_crawl": req.max_pages_per_crawl}
+
+
 # ---------- browsing existing runs ----------
 
 def _entity_dirs():
@@ -485,7 +532,16 @@ def run_blocked(entity: str, run_id: str):
 
 
 @app.get("/api/runs/{entity}/{run_id}/tenders")
-def run_tenders(entity: str, run_id: str, offset: int = 0, limit: int = 20, q: str = "", classification: str = "", tag: str = ""):
+def run_tenders(
+    entity: str, run_id: str, offset: int = 0, limit: int = 20, q: str = "",
+    classification: str = "", tag: str = "", filtered: bool = True,
+):
+    """filtered=true (the default): only tenders that matched at least one
+    tag - what the Tenders page shows by default, since "extracted" and
+    "actually relevant" are two different questions. filtered=false is the
+    "show everything extracted" view. Reads tenders.jsonl directly (tender
+    records live on disk, not in Postgres - see crawler/models.py's
+    docstring)."""
     run_dir = _entity_base_dir(entity) / run_id
     tenders_path = run_dir / "tenders.jsonl"
     if not tenders_path.exists():
@@ -499,8 +555,13 @@ def run_tenders(entity: str, run_id: str, offset: int = 0, limit: int = 20, q: s
             if not line:
                 continue
             record = json.loads(line)
+            if filtered and not record.get("matched_tags"):
+                continue
             if q_lower:
-                haystack = f"{record.get('title') or ''} {record.get('reference_no') or ''}".lower()
+                haystack = " ".join(filter(None, [
+                    record.get("title"), record.get("office"),
+                    record.get("description"), record.get("reference_no"),
+                ])).lower()
                 if q_lower not in haystack:
                     continue
             if classification and record.get("classification") != classification:
@@ -514,7 +575,23 @@ def run_tenders(entity: str, run_id: str, offset: int = 0, limit: int = 20, q: s
     return {"total": total, "offset": offset, "limit": limit, "items": page}
 
 
+@app.get("/api/runs/{entity}/{run_id}/pipeline-logs")
+def run_pipeline_logs(entity: str, run_id: str, limit: int = 100):
+    """What the crawl->classify pipeline did for this run - every LLM call
+    and every other milestone - read back out of the shared
+    logs/crawl_<date>.log (crawler/tender_sync.py writes these interleaved
+    with the crawl subprocess's own lines; see its module docstring) for
+    debugging a run that produced fewer tenders/matches than expected,
+    without needing direct file access."""
+    return tender_sync.read_recent_events(run_id, entity_slug=entity, limit=limit)
+
+
 # ---------- Tenders: watsonx classification (background job, same idiom as crawls) ----------
+#
+# The primary path is now automatic - see _run_tender_pipeline below, fired
+# once a tender_mode crawl finishes. This endpoint stays as the "Reclassify"
+# action for backfill cases: tags added after a run already finished, or a
+# resumed/appended run with newly-pending rows the automatic pass hasn't seen.
 
 CLASSIFY_JOBS = {}  # token -> {status, total, done, matched, error}
 
@@ -526,44 +603,10 @@ class ClassifyRequest(BaseModel):
 def _run_classify_job(token, entity, run_id, tag_ids):
     job = CLASSIFY_JOBS[token]
     try:
-        run_dir = _entity_base_dir(entity) / run_id
-        tenders_path = run_dir / "tenders.jsonl"
-        if not tenders_path.exists():
-            raise FileNotFoundError(f"tenders.jsonl not found for {entity}/{run_id}")
-
-        records = [
-            json.loads(line) for line in tenders_path.read_text(encoding="utf-8").splitlines() if line.strip()
-        ]
-
-        raw_tags = _load_tender_tags_raw()
-        tags = [t for t in raw_tags if t.get("enabled", True) and (not tag_ids or t["id"] in tag_ids)]
-        if not tags:
-            raise ValueError("No enabled tender tags to classify against - add one on the Tenders page first")
-
-        pending_indices = [i for i, r in enumerate(records) if r.get("classification") == "pending"]
-        job["total"] = len(pending_indices)
-
-        results = watsonx_client.classify_batch([records[i] for i in pending_indices], tags)
-
-        matched = 0
-        for local_id, result in results.items():
-            i = pending_indices[int(local_id)]
-            records[i]["classification"] = result["classification"]
-            records[i]["matched_tags"] = result["matched_tags"]
-            records[i]["reason"] = result["reason"]
-            if result["matched_tags"]:
-                matched += 1
-        job["done"] = len(results)
-
-        # atomic rewrite (temp file + rename) so a mid-write crash can't
-        # leave tenders.jsonl half-written/corrupted
-        tmp_path = tenders_path.with_name(tenders_path.name + ".tmp")
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            for record in records:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        tmp_path.replace(tenders_path)
-
-        job["matched"] = matched
+        result = tender_sync.classify_pending_records(str(OUTPUT_DIR), entity, run_id, tag_ids)
+        job["total"] = result["total"]
+        job["done"] = result["done"]
+        job["matched"] = result["matched"]
         job["status"] = "finished"
     except Exception as e:
         job["status"] = "failed"
@@ -605,7 +648,7 @@ class CrawlRequest(BaseModel):
 
 
 @app.post("/api/crawls")
-def start_crawl(req: CrawlRequest):
+def start_crawl(req: CrawlRequest, db: Session = Depends(get_db)):
     seeds = [s.strip() for s in req.seeds if s.strip()]
     if not seeds:
         raise HTTPException(400, "at least one seed URL is required")
@@ -638,6 +681,10 @@ def start_crawl(req: CrawlRequest):
         "-a", f"use_sitemap={req.use_sitemap}",
         "-a", f"max_irrelevant_streak={req.max_irrelevant_streak}",
         "-a", f"tender_mode={req.tender_mode}",
+        # -s overrides a Scrapy setting for this one process without editing
+        # settings.py - user-configurable on the Settings page instead of
+        # only ever being the hardcoded CLOSESPIDER_PAGECOUNT default
+        "-s", f"CLOSESPIDER_PAGECOUNT={_get_max_pages_per_crawl(db)}",
     ]
     if req.entity:
         cmd += ["-a", f"entity={req.entity}"]
@@ -677,6 +724,9 @@ def start_crawl(req: CrawlRequest):
         "scrapy_log_offset": scrapy_log_offset,
         "entity_name": req.entity,
         "run_id": None,
+        "tender_mode": req.tender_mode,
+        "tender_pipeline_started": False,
+        "tender_pipeline": None,
     }
     return {"token": token}
 
@@ -685,6 +735,51 @@ def _todays_scrapy_log_path():
     """Must match settings.py's LOG_FILE naming exactly - one shared file per
     calendar day under logs/."""
     return BASE_DIR / "logs" / f"crawl_{datetime.datetime.now():%Y%m%d}.log"
+
+
+def _run_tender_pipeline(token):
+    """Fired once, the first time _job_status observes a tender_mode job's
+    subprocess has exited successfully (see the trigger in _job_status
+    below) - classifies tenders.jsonl's pending rows against every enabled
+    tag, with no user action needed. Mutates job["tender_pipeline"] in place
+    as it progresses, the same in-process progress-object idiom
+    CLASSIFY_JOBS/_run_classify_job already use, so the frontend can read it
+    from the same status poll it's already running for the crawl itself."""
+    job = JOBS[token]
+    state = job["tender_pipeline"]
+    entity_slug = slugify(job["entity_name"]) if job["entity_name"] else "default"
+    run_id = job["run_id"]
+
+    try:
+        state["extract_status"] = "running"
+        tenders_path = tender_sync.tenders_jsonl_path(str(OUTPUT_DIR), entity_slug, run_id)
+        state["tenders_extracted"] = _count_lines(tenders_path)
+        state["extract_status"] = "done"
+
+        db = SessionLocal()
+        try:
+            enabled_tag_count = db.query(TenderTag).filter(TenderTag.enabled.is_(True)).count()
+        finally:
+            db.close()
+
+        if enabled_tag_count == 0:
+            state["classify_status"] = "skipped_no_tags"
+            tender_sync.log_event(
+                run_id, entity_slug, "warning", "classify_skipped",
+                "No enabled tender tags - add one on the Tenders page to start filtering",
+            )
+            return
+
+        state["classify_status"] = "running"
+        result = tender_sync.classify_pending_records(str(OUTPUT_DIR), entity_slug, run_id, tag_ids=None)
+        state["classify_total"] = result["total"]
+        state["classify_done"] = result["done"]
+        state["classify_matched"] = result["matched"]
+        state["classify_status"] = "done"
+    except Exception as e:
+        state["classify_status"] = "error"
+        state["classify_error"] = str(e)
+        tender_sync.log_event(run_id, entity_slug, "error", "tender_pipeline_failed", str(e))
 
 
 def _job_status(token, job):
@@ -709,6 +804,19 @@ def _job_status(token, job):
     entity_slug = slugify(job["entity_name"]) if job["entity_name"] else "default"
     tail = "\n".join(log_text.splitlines()[-200:])
 
+    # fire the classify pipeline the first time this poll observes the crawl
+    # has finished successfully - piggybacking on the existing poll (rather
+    # than a separate watcher) means it starts within one poll interval of
+    # the frontend already noticing "finished", no extra infrastructure needed
+    if job.get("tender_mode") and status == "finished" and job["run_id"] and not job["tender_pipeline_started"]:
+        job["tender_pipeline_started"] = True
+        job["tender_pipeline"] = {
+            "extract_status": "not_started", "tenders_extracted": None,
+            "classify_status": "not_started", "classify_total": 0,
+            "classify_done": 0, "classify_matched": 0, "classify_error": None,
+        }
+        threading.Thread(target=_run_tender_pipeline, args=(token,), daemon=True).start()
+
     return {
         "token": token,
         "status": status,
@@ -716,6 +824,7 @@ def _job_status(token, job):
         "entity": entity_slug,
         "run_id": job["run_id"],
         "log_tail": tail,
+        "tender_pipeline": job.get("tender_pipeline"),
     }
 
 

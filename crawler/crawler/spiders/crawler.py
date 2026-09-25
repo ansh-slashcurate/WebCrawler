@@ -6,7 +6,15 @@ from scrapy.utils.sitemap import Sitemap, sitemap_urls_from_robots
 from crawler.items import PageItems
 from crawler.pipelines import format_duration, utc_timestamp, slugify
 from crawler.entity import EntityQuery
-from crawler.tender import tender_page_score
+from crawler.tender import tender_page_score, looks_like_pagination_link
+from crawler.aspnet_postback import find_next_page_postback, build_next_page_request
+from crawler.liferay_api import (
+    looks_like_liferay,
+    find_tender_cx_bundle_url,
+    find_headless_object_path,
+    build_listing_url as build_liferay_listing_url,
+    extract_records_from_api_response,
+)
 from crawler.challenge import detect_challenge
 from crawler.auth import load_auth_config, AuthError
 from crawler.ytpipeline import (
@@ -70,6 +78,11 @@ DENY_EXTENSIONS = (
 # blindly following it used to cost, while still crawling a genuine .exe-
 # suffixed HTML page normally.
 VERIFY_CONTENT_TYPE_EXTENSIONS = (".exe",)
+# items per page requested from a discovered Liferay headless-object API
+# (crawler.liferay_api) - independent of ASP.NET postback pagination's own
+# page size (which the site controls, not us); here WE choose it, so a
+# larger page means fewer round trips for the same MAX_TENDER_PAGES cap
+LIFERAY_PAGE_SIZE = 50
 
 class WebsiteSpider(scrapy.Spider):
 
@@ -418,7 +431,23 @@ class WebsiteSpider(scrapy.Spider):
                 meta={"depth": 0, "start_time": time.time(), "source": "youtube_search"},
             )
 
-    def start_requests(self):
+    async def start(self):
+        # Scrapy >= 2.13 no longer calls a spider's start_requests() at all
+        # (confirmed against the installed 2.18: there is no reference to
+        # "start_requests" anywhere in scrapy's own runtime code, only in a
+        # docstring showing the OLD convention) - it only calls this async
+        # start() method, falling back to its own trivial default
+        # (`Request(url, dont_filter=True)` per self.start_urls, no meta of
+        # ours at all) if a spider doesn't define one. That silently skipped
+        # every bit of setup below - auth handling, "source"/"start_time"
+        # meta on the seed request itself (which tender_mode's postback/
+        # Liferay-detection gating on source=="seed" depends on), sitemap
+        # discovery, YouTube search - for every crawl, not just tender ones.
+        # Confirmed live: a seed request's meta showed only
+        # {"is_start_request": True, "depth": 0, ...} (fields Scrapy's own
+        # middleware inject) with none of this method's own keys, and its
+        # parse() log line read "via link" instead of "via seed".
+        #
         # fetch plain first; parse() escalates to playwright only if the
         # plain fetch turns out to have no extractable content
         login_domains = {}
@@ -437,7 +466,10 @@ class WebsiteSpider(scrapy.Spider):
         for domain, urls in login_domains.items():
             yield self._build_login_request(self.auth_config[domain], domain, urls)
 
-        yield from self._youtube_search_requests()
+        # "yield from" a plain (sync) generator isn't valid syntax inside an
+        # async def generator - delegate item-by-item instead
+        for request in self._youtube_search_requests():
+            yield request
 
         if not self.use_sitemap:
             return
@@ -506,6 +538,7 @@ class WebsiteSpider(scrapy.Spider):
         elif sitemap.type == "urlset":
             found = 0
             skipped = 0
+            skipped_not_tender = 0
             for entry in sitemap:
                 loc = entry.get("loc")
                 if not loc:
@@ -519,11 +552,27 @@ class WebsiteSpider(scrapy.Spider):
                     skipped += 1
                     self.logger.warning("Dropped: non-HTML sitemap entry: %s", loc)
                     continue
+                # sitemap URLs also bypass the hard-scope tender filter that
+                # ordinarily gates parse()'s link-following loop, since they
+                # never go through LinkExtractor at all - confirmed live,
+                # this let a tender crawl wander into hundreds of unrelated
+                # same-domain pages (About Us, careers, policy PDFs, ...)
+                # just because they happened to be listed in the site's
+                # sitemap.xml, each counting against CLOSESPIDER_PAGECOUNT.
+                # A sitemap entry has no anchor text to score, only its own
+                # URL - same as a nav item's href often carrying the
+                # "/procurement/tenders" keyword its visible text doesn't.
+                if self.tender_mode and tender_page_score(loc) == 0 and not looks_like_pagination_link(None, loc):
+                    skipped_not_tender += 1
+                    continue
                 found += 1
                 meta = {"depth": 0, "start_time": time.time(), "source": "sitemap"}
                 meta.update(self._auth_request_meta(loc_domain))
                 yield self._request_for_url(loc, meta)
-            self.logger.info("Sitemap %s contributed %d URL(s), skipped %d non-HTML", response.url, found, skipped)
+            self.logger.info(
+                "Sitemap %s contributed %d URL(s), skipped %d non-HTML, skipped %d non-tender-related",
+                response.url, found, skipped, skipped_not_tender,
+            )
 
     # Parsing response
     def parse(self, response):
@@ -614,6 +663,68 @@ class WebsiteSpider(scrapy.Spider):
             source = source,
         )
 
+        # ASP.NET WebForms pagination (__doPostBack, confirmed live on PNB's
+        # own tender listing) has no real href for page 2+, so it can't be
+        # picked up by the ordinary LinkExtractor loop below at all - follow
+        # it as its own postback request instead, independent of max_depth
+        # (it's the same logical listing page, not a deeper link) and capped
+        # by MAX_TENDER_PAGES so a pager that never reports "no next page"
+        # can't chain forever.
+        #
+        # Only ever started from the listing's own canonical entry points
+        # (the seed/sitemap fetch, or a page already inside this same
+        # postback chain) - NEVER from source="link". Confirmed on a real
+        # PNB crawl: the page's own "Skip to Main Content" accessibility
+        # link resolves (fragment stripped) straight back to this exact
+        # URL, and its anchor text/URL both score >0 on tender_page_score
+        # (the URL literally contains "Tender.aspx"), so it passes the
+        # hard-scope link filter below like any other tender-relevant link.
+        # Without this guard, that single self-link caused every page
+        # discovered as a "link" to start its own independent copy of the
+        # ENTIRE pagination chain from page 1, roughly doubling every
+        # extracted tender (confirmed: ~154 rows in tenders.jsonl for what
+        # should have been ~77) and doubling classification time with it.
+        if self.tender_mode and source in ("seed", "sitemap", "tender_pagination"):
+            page_num = response.meta.get("tender_page", 1)
+            max_pages = self.settings.getint("MAX_TENDER_PAGES", 15)
+            if page_num < max_pages:
+                event_target = find_next_page_postback(response)
+                if event_target:
+                    self.logger.info(
+                        "Tender pagination: following postback to page %d on %s",
+                        page_num + 1, response.url,
+                    )
+                    yield build_next_page_request(
+                        response, event_target, callback=self.parse,
+                        meta={
+                            **response.meta, "tender_page": page_num + 1, "depth": depth,
+                            "start_time": time.time(), "source": "tender_pagination",
+                        },
+                    )
+
+        # some banks' tender listings have no server-rendered content at
+        # all (confirmed live on Canara Bank: a Liferay CMS site whose
+        # listing is fetched entirely client-side by a JS bundle from a
+        # JSON API) - no column-matching heuristic over this page's HTML
+        # can ever find rows that were never in the HTML to begin with.
+        # Same source-scoping as the postback pagination above and for the
+        # same reason: only ever started from the listing's own canonical
+        # entry point, never from an ordinary followed link.
+        if self.tender_mode and source in ("seed", "sitemap") and looks_like_liferay(response.text):
+            bundle_url = find_tender_cx_bundle_url(response.text, response.url)
+            if bundle_url:
+                self.logger.info(
+                    "Tender listing at %s looks client-rendered (Liferay) - fetching %s",
+                    response.url, bundle_url,
+                )
+                yield scrapy.Request(
+                    bundle_url, callback=self._parse_liferay_bundle,
+                    meta={
+                        "tender_listing_url": response.url, "depth": depth,
+                        "start_time": time.time(), "source": "liferay_bundle",
+                    },
+                )
+
         if depth >= self.max_depth:
             return
 
@@ -637,7 +748,19 @@ class WebsiteSpider(scrapy.Spider):
                 return
 
         # scrolling more pages basically doing pagination
+        tender_page = response.meta.get("tender_page", 1)
+        tender_page_limit_hit = self.tender_mode and tender_page >= self.settings.getint("MAX_TENDER_PAGES", 15)
         for link in self.link_extractor.extract_links(response):
+            if link.url == response.url:
+                # a same-page "skip to content"/"back to top" anchor -
+                # canonicalizes (fragment stripped) straight back to this
+                # exact page. Re-queuing the page we're already parsing as
+                # if it were newly discovered is never useful, and in
+                # tender_mode specifically it was confirmed to double every
+                # extracted tender by letting a page reached this way start
+                # its own independent copy of the postback pagination chain
+                # (see the tender_pagination block above)
+                continue
             if is_youtube_domain(link.url) and not is_youtube_video_url(link.url):
                 # a YouTube page links to hundreds of site-chrome pages
                 # (/about, /ads, /creators, /t/terms, /howyoutubeworks, ...)
@@ -647,10 +770,30 @@ class WebsiteSpider(scrapy.Spider):
                 # pages an entity-focused video crawl never wanted
                 continue
 
-            self.logger.info("Found link %s (depth=%d) on %s", link.url, depth + 1, response.url)
             link_domain = urlparse(link.url).netloc
+            is_pagination = self.tender_mode and looks_like_pagination_link(link.text, link.url)
+            if is_pagination and tender_page_limit_hit:
+                # capped the same way postback/Liferay pagination already
+                # are (MAX_TENDER_PAGES) - without an independent cap here
+                # too, removing this pagination hop's max_depth cost just
+                # below would let it run unbounded except for the crawl's
+                # own shared CLOSESPIDER_PAGECOUNT, competing with every
+                # other page (detail pages, sitemap URLs) for that budget
+                continue
+            # a genuine <a href> pagination control (confirmed live: Bank of
+            # Maharashtra paginates its listing this way, not via postback
+            # or a JSON API) is the SAME logical listing, not a deeper page -
+            # same reasoning as the dedicated postback/Liferay pagination
+            # blocks above, which are already independent of max_depth.
+            # Without this, max_depth=3 (the UI default) only ever reached
+            # ~4 of a bank's paginated pages regardless of how many more
+            # tenders existed beyond that, silently missing anything older.
+            child_depth = depth if is_pagination else depth + 1
+            self.logger.info("Found link %s (depth=%d) on %s", link.url, child_depth, response.url)
 
-            child_meta = {"depth": depth + 1, "start_time": time.time(), "source": "link"}
+            child_meta = {"depth": child_depth, "start_time": time.time(), "source": "link"}
+            if is_pagination:
+                child_meta["tender_page"] = tender_page + 1
             priority = 0
             if self.entity_query and not self.tender_mode:
                 child_meta["irrelevant_streak"] = irrelevant_streak
@@ -658,11 +801,20 @@ class WebsiteSpider(scrapy.Spider):
                 # already mentions the entity get crawled before filler pages
                 priority, _, _ = self.entity_query.score(link.text or "")
             if self.tender_mode:
-                # prioritize links toward the tenders/procurement section
-                # over the rest of the bank's site (anchor text + URL, since
-                # a nav item's href often carries the keyword the visible
-                # text doesn't, e.g. "/procurement/tenders")
-                priority += tender_page_score((link.text or "") + " " + link.url)
+                # hard scope, not just priority: a tender crawl only follows
+                # links that read as tender/procurement-related (anchor text
+                # + URL, since a nav item's href often carries the keyword
+                # the visible text doesn't, e.g. "/procurement/tenders"), or
+                # a same-page pagination control - never the rest of the
+                # bank's site (About Us, NRI, Internet Banking, ...)
+                tender_score = tender_page_score((link.text or "") + " " + link.url)
+                if tender_score == 0 and not is_pagination:
+                    continue
+                # pagination gets crawled before individual detail pages, so
+                # the listing's own page count (MAX_TENDER_PAGES-worthy
+                # coverage) isn't starved by CLOSESPIDER_PAGECOUNT going to
+                # detail pages first
+                priority += tender_score + (5 if is_pagination else 0)
 
             auth_meta = self._auth_request_meta(link_domain)
             if auth_meta:
@@ -671,3 +823,66 @@ class WebsiteSpider(scrapy.Spider):
                 yield self._request_for_url(link.url, {**child_meta, **auth_meta}, priority=priority)
             else:
                 yield self._request_for_url(link.url, child_meta, priority=priority)
+
+    def _parse_liferay_bundle(self, response):
+        """Callback for the Liferay Client Extension bundle fetched from
+        parse()'s tender_mode block above - finds the headless-object API
+        path it calls for its paginated listing and starts fetching that."""
+        listing_url = response.meta["tender_listing_url"]
+        object_path = find_headless_object_path(response.text)
+        if not object_path:
+            self.logger.info(
+                "Liferay bundle %s didn't reference a headless-object API - giving up on %s",
+                response.url, listing_url,
+            )
+            return
+
+        api_url = build_liferay_listing_url(listing_url, object_path, page=1, page_size=LIFERAY_PAGE_SIZE)
+        self.logger.info("Liferay tender listing API discovered for %s: %s", listing_url, api_url)
+        yield scrapy.Request(
+            api_url, callback=self._parse_liferay_api_page,
+            meta={
+                "tender_listing_url": listing_url, "liferay_object_path": object_path,
+                "liferay_page": 1, "depth": response.meta["depth"],
+                "start_time": time.time(), "source": "liferay_api",
+                # without this, curl_cffi's own Chrome-impersonation Accept
+                # header (correct for a real page load, see stealth_http.py)
+                # lists application/xml ahead of application/json, and
+                # Liferay's content negotiation returns XML instead -
+                # confirmed live against Canara Bank's own API
+                "force_headers": {"Accept": "application/json"},
+            },
+        )
+
+    def _parse_liferay_api_page(self, response):
+        """Callback for one page of a discovered Liferay headless-object
+        API - yields a PageItems with tender_records already attached
+        (TenderExtractionPipeline skips re-extracting these from "html",
+        which is this response's raw JSON, not markup - see its own
+        docstring), then follows to the next page until either side of
+        MAX_TENDER_PAGES/totalCount says to stop."""
+        listing_url = response.meta["tender_listing_url"]
+        page_num = response.meta["liferay_page"]
+        records, total_count = extract_records_from_api_response(response.text, listing_url)
+
+        yield PageItems(
+            url=f"{listing_url}#liferay-page={page_num}",
+            html=response.text,
+            depth=response.meta["depth"],
+            crawledAt=utc_timestamp(),
+            source="liferay_api",
+            tender_records=records,
+            is_api_json=True,
+        )
+
+        max_pages = self.settings.getint("MAX_TENDER_PAGES", 15)
+        fetched_so_far = page_num * LIFERAY_PAGE_SIZE
+        if records and page_num < max_pages and fetched_so_far < total_count:
+            api_url = build_liferay_listing_url(
+                listing_url, response.meta["liferay_object_path"],
+                page=page_num + 1, page_size=LIFERAY_PAGE_SIZE,
+            )
+            yield scrapy.Request(
+                api_url, callback=self._parse_liferay_api_page,
+                meta={**response.meta, "liferay_page": page_num + 1, "start_time": time.time()},
+            )

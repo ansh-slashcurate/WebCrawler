@@ -1,6 +1,6 @@
 """SQLAlchemy models for the control panel's Postgres-backed config data.
 
-Three tables:
+Four tables:
   - users: laid down now for future role-based access. Nothing in the app
     enforces roles yet - the admin panel stays fully open to whoever can
     reach it, exactly as before. `role` exists so that switch doesn't
@@ -9,10 +9,21 @@ Three tables:
     list, previously flat JSON files (bank_sites.json/tender_tags.json).
     Both relate back to the user who created them (created_by_id) - the
     same readiness-for-RBAC reasoning as the users table itself.
+  - app_settings: a small key/value table for user-editable crawl defaults
+    (currently just "max_pages_per_crawl", the Settings page's control over
+    CLOSESPIDER_PAGECOUNT) - a plain key/value shape rather than one column
+    per setting, so a future setting doesn't need its own migration.
 
-Crawl output (pages.jsonl/clean.jsonl/tenders.jsonl/summary.json under
-output/<entity>/<run_id>/) is unaffected - it stays on disk, written by
-crawler.pipelines.StoragePipeline exactly as before.
+Deliberately NOT here: the tenders themselves. This project self-hosts and
+some of its crawl/extraction code is reused directly by a separate RAG
+project - crawl output staying disk-only (no SQLAlchemy/Postgres dependency
+in that path) keeps both of those simple. Tender records + their
+classification live in output/<entity>/<run_id>/tenders.jsonl
+(crawler.pipelines.StoragePipeline writes it, crawler/tender_sync.py
+classifies it after a crawl finishes), same as pages.jsonl/clean.jsonl.
+Pipeline debugging events (every LLM call, classify start/finish, failures)
+go to a log file (logs/tender_pipeline_<date>.log), not a database table
+either - see crawler/tender_sync.py.
 """
 import datetime
 import enum
@@ -64,3 +75,14 @@ class TenderTag(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), default=datetime.datetime.utcnow)
 
     created_by: Mapped[User | None] = relationship(back_populates="tender_tags")
+
+
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    key: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow,
+    )

@@ -194,6 +194,19 @@ class NormalizationPipeline:
             # no HTML markup here, so trafilatura/table extraction don't apply
             cleaned_content = normalize_text(html)
             tables = []
+        elif adapter.get("is_api_json"):
+            # a Liferay headless-object JSON API response (crawler.liferay_api) -
+            # "html" here is raw JSON, not markup; trafilatura would find
+            # nothing in it and the item would wrongly get dropped just
+            # below as "no extractable content" even though its
+            # tender_records (already attached by the spider) are the real
+            # payload. Build cleaned_content from those records instead of
+            # trying to parse the JSON as prose.
+            tender_records = adapter.get("tender_records") or []
+            cleaned_content = normalize_text(" ".join(
+                r.get("title") or r.get("description") or "" for r in tender_records
+            ))
+            tables = []
         else:
             # tables are extracted separately (below) as structured data, so
             # they don't get linearized into prose and mangled by normalize_text.
@@ -234,9 +247,75 @@ class TenderExtractionPipeline:
             return item
 
         adapter = ItemAdapter(item)
+        # already populated by the spider itself (crawler.liferay_api, for a
+        # site whose listing is client-rendered from a JSON API rather than
+        # present in the page's own HTML at all) - don't re-run HTML-based
+        # extraction over the raw JSON, which would find nothing anyway
+        if adapter.get("tender_records"):
+            return item
+
         records = extract_tender_records(adapter.get("html", ""), adapter.get("url"))
         if records:
             adapter["tender_records"] = records
+        return item
+
+
+# a tender record can legitimately repeat across different page fetches
+# within the same run, for reasons ContentDedupPipeline's raw-HTML hash
+# can't catch (it runs earlier, on "html", and two fetches only need to
+# differ in one embedded byte to defeat it) - confirmed live on two
+# different real banks, for two different underlying reasons: PNB's own
+# ASP.NET ViewState blob changes on every request even when the visible
+# page is identical, and Bank of Maharashtra embeds a per-request
+# session/CSRF-style token in its own internal links, so its /tender-search
+# page (and the same ~130 real tenders it lists) gets fetched repeatedly at
+# several different "?tsq=<token>" URLs. Rather than chase every new
+# site-specific reason a "duplicate" page looks byte-different, dedupe at
+# the level that actually matters: the tender record's own identity.
+class TenderDedupPipeline:
+    def __init__(self, redis_url):
+        self.redis_url = redis_url
+        self.client = None
+
+    @classmethod
+    def from_crawler(cls, crawler):
+        return cls(redis_url=crawler.settings.get("REDIS_URL", "redis://localhost:6379/0"))
+
+    def open_spider(self, spider):
+        if not getattr(spider, "tender_mode", False):
+            return
+        self.client = redis.from_url(self.redis_url)
+        # same per-entity/per-run scoping convention as ContentDedupPipeline,
+        # so a resumed run keeps deduping against what it already stored and
+        # a genuinely fresh run starts with a clean slate
+        scope = getattr(spider, "run_scope", None) or "default"
+        run_id = getattr(spider, "run_id", None)
+        self.seen_key = f"tender_hashes:{scope}:{run_id}" if run_id else f"tender_hashes:{scope}"
+
+    def process_item(self, item, spider):
+        if not getattr(spider, "tender_mode", False):
+            return item
+
+        adapter = ItemAdapter(item)
+        records = adapter.get("tender_records") or []
+        if not records:
+            return item
+
+        unique = []
+        for record in records:
+            basis = "|".join([
+                record.get("title") or "", record.get("office") or "",
+                record.get("published_date") or "", record.get("closing_date") or "",
+            ])
+            content_hash = hashlib.sha256(basis.encode("utf-8")).hexdigest()
+            # SADD returns 0 if already present - atomic, so two records
+            # hashing identically at the same instant can't both pass
+            if self.client.sadd(self.seen_key, content_hash):
+                unique.append(record)
+            else:
+                spider.crawler.stats.inc_value("dropped/duplicate_tender")
+
+        adapter["tender_records"] = unique
         return item
 
 
@@ -391,6 +470,7 @@ class StoragePipeline:
                 "duplicate": stats.get("dropped/duplicate", 0),
                 "empty": stats.get("dropped/empty", 0),
                 "irrelevant": stats.get("dropped/irrelevant", 0),
+                "duplicate_tender": stats.get("dropped/duplicate_tender", 0),
             },
             "blocked": stats.get("blocked/pages", 0),
             "by_source": {

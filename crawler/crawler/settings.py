@@ -122,6 +122,7 @@ ITEM_PIPELINES = {
     "crawler.ytpipeline.YoutubePipeline": 120,
     "crawler.pipelines.NormalizationPipeline": 150,
     "crawler.pipelines.TenderExtractionPipeline": 160,
+    "crawler.pipelines.TenderDedupPipeline": 165,
     "crawler.pipelines.EntityRelevancePipeline": 175,
     "crawler.pipelines.StoragePipeline": 200,
 }
@@ -137,6 +138,12 @@ YOUTUBE_MAX_COMMENTS = 100
 # videos returned by one entity keyword search (search.list costs 100 quota
 # units/call regardless of maxResults, so this is a single page, not paginated)
 YOUTUBE_SEARCH_MAX_RESULTS = 25
+
+# hard cap on how many __doPostBack "Next" pages (crawler.aspnet_postback)
+# a single tender listing will follow in tender_mode - a safety net against
+# an unbounded postback chain (a pager that never reports "no next page"),
+# not a number tuned to any specific bank's real page count
+MAX_TENDER_PAGES = 15
 
 # Enable and configure the AutoThrottle extension (disabled by default)
 # See https://docs.scrapy.org/en/latest/topics/autothrottle.html

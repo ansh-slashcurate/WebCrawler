@@ -8,6 +8,14 @@ export default function ConnectionsPanel() {
   const [health, setHealth] = useState(null);
   const [error, setError] = useState(null);
 
+  // Max pages per crawl (CLOSESPIDER_PAGECOUNT override, see /api/settings) -
+  // loaded/saved separately from health, which is a pure read-only status
+  // poll and shouldn't also own writing user config
+  const [pageCap, setPageCap] = useState("");
+  const [savedPageCap, setSavedPageCap] = useState(null);
+  const [savingPageCap, setSavingPageCap] = useState(false);
+  const [pageCapError, setPageCapError] = useState(null);
+
   const load = () => {
     api
       .health()
@@ -18,11 +26,43 @@ export default function ConnectionsPanel() {
       .catch((e) => setError(e.message));
   };
 
+  const loadSettings = () => {
+    api
+      .settings()
+      .then((s) => {
+        setPageCap(String(s.max_pages_per_crawl));
+        setSavedPageCap(s.max_pages_per_crawl);
+      })
+      .catch((e) => setPageCapError(e.message));
+  };
+
   useEffect(() => {
     load();
+    loadSettings();
     const id = setInterval(load, 8000);
     return () => clearInterval(id);
   }, []);
+
+  const handleSavePageCap = async (e) => {
+    e.preventDefault();
+    const parsed = Number(pageCap);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      setPageCapError("Enter a whole number of at least 1.");
+      return;
+    }
+    setSavingPageCap(true);
+    setPageCapError(null);
+    try {
+      const s = await api.updateSettings({ max_pages_per_crawl: parsed });
+      setSavedPageCap(s.max_pages_per_crawl);
+    } catch (err) {
+      setPageCapError(err.message);
+    } finally {
+      setSavingPageCap(false);
+    }
+  };
+
+  const pageCapDirty = savedPageCap !== null && String(savedPageCap) !== pageCap;
 
   return (
     <Card>
@@ -82,20 +122,33 @@ export default function ConnectionsPanel() {
               <p className="text-xs text-red-600 dark:text-red-400">{health.auth.error}</p>
             )}
 
-            <dl className="grid grid-cols-2 gap-x-6 gap-y-2 border-t border-slate-100 pt-4 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400 sm:grid-cols-4">
+            <dl className="grid grid-cols-2 gap-x-6 gap-y-3 border-t border-slate-100 pt-4 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">
               <div>
-                <dt className="uppercase tracking-wide text-slate-400 dark:text-slate-500">Page cap</dt>
-                <dd className="font-mono text-slate-700 dark:text-slate-300">{health.settings.closespider_pagecount}</dd>
+                <dt className="uppercase tracking-wide text-slate-400 dark:text-slate-500">Max pages per crawl</dt>
+                <dd className="mt-1.5">
+                  <form onSubmit={handleSavePageCap} className="flex items-center gap-1.5">
+                    <input
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={pageCap}
+                      onChange={(e) => setPageCap(e.target.value)}
+                      className="w-20 rounded-md border border-slate-300 bg-white px-2 py-1 font-mono text-xs text-slate-700 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/15 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                    />
+                    <button
+                      type="submit"
+                      disabled={savingPageCap || !pageCapDirty}
+                      className="rounded-md px-2 py-1 text-xs font-medium text-blue-600 transition-colors hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-40 dark:text-blue-400 dark:hover:bg-blue-900/20"
+                    >
+                      {savingPageCap ? "Saving…" : "Save"}
+                    </button>
+                  </form>
+                  {pageCapError && <p className="mt-1 text-red-600 dark:text-red-400">{pageCapError}</p>}
+                </dd>
               </div>
               <div>
                 <dt className="uppercase tracking-wide text-slate-400 dark:text-slate-500">Download delay</dt>
-                <dd className="font-mono text-slate-700 dark:text-slate-300">{health.settings.download_delay}s</dd>
-              </div>
-              <div className="col-span-2 sm:col-span-2">
-                <dt className="uppercase tracking-wide text-slate-400 dark:text-slate-500">Output dir</dt>
-                <dd className="truncate font-mono text-slate-700 dark:text-slate-300" title={health.settings.output_dir}>
-                  {health.settings.output_dir}
-                </dd>
+                <dd className="mt-1.5 py-1 font-mono text-slate-700 dark:text-slate-300">{health.settings.download_delay}s</dd>
               </div>
             </dl>
           </div>

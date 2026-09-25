@@ -94,6 +94,16 @@ def stealth_fetch(request: Request) -> Response:
     session = _session_for_domain(domain)
 
     headers = {**PLATFORM_HEADERS, **_forwarded_headers(request)}
+    # an explicit escape hatch past UNFORWARDED_HEADERS for the rare request
+    # that isn't a real page navigation and genuinely needs a header
+    # curl_cffi's own browser-impersonation default would get wrong - e.g.
+    # Accept: application/json for a same-origin JSON API call. Confirmed
+    # live: Chrome's own default Accept header (which curl_cffi reproduces,
+    # correctly, for an actual page load) lists application/xml ahead of
+    # application/json, so a Liferay headless-object API - which does real
+    # content negotiation on Accept - silently returned XML instead of the
+    # JSON crawler.liferay_api expects, for every field identical data.
+    headers.update(request.meta.get("force_headers") or {})
     timeout = request.meta.get("download_timeout") or 30
 
     curl_response = session.request(

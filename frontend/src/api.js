@@ -44,6 +44,14 @@ export const api = {
   deleteAuthDomain: (domain) =>
     request(`/api/auth-domains/${encodeURIComponent(domain)}`, { method: "DELETE" }),
 
+  settings: () => request("/api/settings"),
+  updateSettings: (payload) =>
+    request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+
   // ---- Tenders page: saved bank sites, tags, per-run tender records, watsonx classify ----
   bankSites: () => request("/api/bank-sites"),
   addBankSite: (payload) =>
@@ -63,11 +71,12 @@ export const api = {
     }),
   deleteTenderTag: (id) => request(`/api/tender-tags/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
-  runTenders: (entity, runId, { offset = 0, limit = 20, q = "", classification = "", tag = "" } = {}) =>
+  runTenders: (entity, runId, { offset = 0, limit = 20, q = "", classification = "", tag = "", filtered = true } = {}) =>
     request(
       `/api/runs/${encodeURIComponent(entity)}/${encodeURIComponent(runId)}/tenders` +
         `?offset=${offset}&limit=${limit}&q=${encodeURIComponent(q)}` +
-        `&classification=${encodeURIComponent(classification)}&tag=${encodeURIComponent(tag)}`
+        `&classification=${encodeURIComponent(classification)}&tag=${encodeURIComponent(tag)}` +
+        `&filtered=${filtered ? "true" : "false"}`
     ),
   classifyTenders: (entity, runId, tagIds) =>
     request(`/api/runs/${encodeURIComponent(entity)}/${encodeURIComponent(runId)}/tenders/classify`, {
@@ -76,6 +85,8 @@ export const api = {
       body: JSON.stringify({ tag_ids: tagIds && tagIds.length ? tagIds : null }),
     }),
   classifyStatus: (token) => request(`/api/tender-classify/${encodeURIComponent(token)}`),
+  pipelineLogs: (entity, runId, limit = 100) =>
+    request(`/api/runs/${encodeURIComponent(entity)}/${encodeURIComponent(runId)}/pipeline-logs?limit=${limit}`),
 };
 
 export { API_BASE };

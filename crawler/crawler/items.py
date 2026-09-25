@@ -28,3 +28,9 @@ class PageItems(scrapy.Item):
     youtube_video = scrapy.Field()
     comments = scrapy.Field()
     tender_records = scrapy.Field()
+    # True for a page built from a Liferay headless-object JSON API response
+    # (crawler.liferay_api) rather than real HTML - NormalizationPipeline
+    # skips trafilatura for these (it would find nothing in raw JSON) and
+    # TenderExtractionPipeline skips re-extracting from "html" (already
+    # unfiltered/pending tender_records set directly by the spider)
+    is_api_json = scrapy.Field()

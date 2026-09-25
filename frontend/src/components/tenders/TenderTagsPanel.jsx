@@ -49,11 +49,6 @@ export default function TenderTagsPanel() {
     <Card>
       <CardHeader title="Tags (what you're looking for)" icon={IconFileText} />
       <div className="p-5">
-        <p className="mb-4 max-w-2xl text-xs text-slate-400 dark:text-slate-500">
-          These are sent to watsonx when you classify a run's tenders — not matched locally. A short
-          description helps the model more than the name alone (e.g. name "AI RFP", description "tenders about
-          AI, machine learning, chatbots, GenAI platforms").
-        </p>
 
         <form onSubmit={handleSubmit} className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-[1fr_2fr_auto] sm:items-end">
           <div>

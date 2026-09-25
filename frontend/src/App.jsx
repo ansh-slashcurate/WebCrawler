@@ -22,7 +22,7 @@ const PAGE_META = {
   "/runs": { title: "Runs", description: "Browse crawled pages by entity and run." },
   "/tenders": { title: "Tenders", description: "Crawl bank tender/procurement pages and classify RFPs against your tags." },
   "/auth": { title: "Authentication", description: "Manage per-domain login/API-key credentials." },
-  "/settings": { title: "Settings", description: "Manage system connections and saved bank sites." },
+  "/settings": { title: "Settings", description: "Manage system connections, crawl defaults, and saved bank sites." },
 };
 
 function NavButton({ to, icon: Icon, children }) {
